@@ -259,6 +259,13 @@ segnale grazie al rumore" finché non si prova un attaccante che riscala l'updat
 Seed 456 e 789 (2026-10-09): solo taglio 1.0025, 1.0525, 1.1425 e 0.9975, 1.015, 1.0425; ε = 512 1.01, 0.99, 1.0475 e
 0.9925, 0.9925, 1.0175. Al round 1 il solo taglio toglie il segnale in quattro seed su quattro. Attaccante che riscala
 l'update: codice pronto (`--canary-rescale`, Sprint 10zz+170), coda di 24 run sul Mac principale con previsione R1-R4.
+Esito (2026-10-10, Mac principale, seed 42, 123, 1234): riscalando l'update di 16 al round 1, con solo taglio il segnale
+torna nei seed 42 e 1234 (1.518 e 1.335) ma non nel 123 (0.938), dove la norma dell'update è 21 e non 16; con ε = 64
+(1.015, 1.008, 1.047) ed ε = 512 (0.748, 0.935, 1.042) non torna. La loss dei non-membri è minima proprio a s = 16 con
+solo taglio, quindi l'attaccante può trovare s senza etichette. Lettura provvisoria: il taglio da solo non protegge da un
+attaccante che riscala; il rumore sì. In attesa: seed 456 e 789 (quarta macchina), s fitto fra 12 e 32 (Windows).
+Fra macchine i numeri non coincidono cifra per cifra (seed 1234, scarto massimo 0.045 fra Windows e Mac): si confrontano
+condizioni solo dentro la stessa macchina (`ESPERIMENTI.md`).
 
 **Canary bilanciato su Caltech, seed 42 (2026-10-01, Mac principale,
 `experiments/_canary_balanced_caltech_s42` e `_canary_balanced_caltech_swap_s42`, commit 11c7fdf e

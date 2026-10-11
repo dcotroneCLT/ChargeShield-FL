@@ -1817,6 +1817,42 @@ done; done; done
 
 Ordine: prima il solo taglio sui tre seed (risponde a R1 dopo circa 7 ore), poi ε = 64, ε = 512, senza DP.
 
+**Esito sul Mac principale (2026-10-10).** 24 run su 24, dal 9 ottobre alle 15:38 al 10 alle 21:57 (ora del Mac),
+commit 6acc19f pulito, zero Traceback. Somme A+B della loss grezza al round 1 con s = 16 (statistica dichiarata): solo
+taglio 1.518 (seed 42), 0.938 (123), 1.335 (1234); ε = 64 1.015, 1.008, 1.047; ε = 512 0.748, 0.935, 1.042. Su tutta la
+griglia s = 1-32 al round 1: ε = 64 fra 0.86 e 1.15, ε = 512 fra 0.75 e 1.21; senza DP con s > 1 il segnale sparisce
+(0.72-1.07), perché riscalare oltre l'update vero rovina il modello. Ai round 2 e 3 la norma dell'update è 1-2 e con
+s ≥ 8 il modello satura (somme esattamente 1.000, loss uguali a s = 16 e 32): lì la griglia non dice nulla, conta il
+round 1. (R1) Regge in due seed su tre: 42 e 1234, dove la norma dell'update al round 1 è 15.9/14.1 e 16.1/14.5 (bracci
+A/B) e il fattore di taglio è vicino a 1/16. Non regge nel seed 123, dove la norma è 21.0/21.4: con s = 16 l'update
+ricostruito è circa tre quarti di quello vero e il segnale non torna (0.938; 1.065 con s = 32). Lettura, da verificare
+dopo il risultato: il segnale torna solo se s è vicino alla norma vera. Prova in corso su Windows con s fitto fra 12 e 32
+(cartelle RX), dove per il seed 123 servono s = 20-22. (R2) Regge. (R3) Con ε = 512 nessun segnale a s = 16; il 0.748
+del seed 42 è sotto 1 (i membri hanno loss più alta) e lo leggo come rumore del modello riscalato, da riguardare sui seed
+456 e 789. (R4) Regge: con s = 1 ogni run riproduce cifra per cifra la run già salvata dello stesso seed e condizione
+(senza DP 1.583, 1.38, 1.50 al round 1, come prima).
+
+Scelta di s senza etichette. Con solo taglio la loss media dei canary non-membri al round 1 è minima a s = 16 in tutti e
+sei i bracci: da circa 0.14 a s = 1 scende a 6e-5-2e-3 nei seed 42 e 1234 e a circa 1e-2 nel 123. Un attaccante può
+quindi scegliere s minimizzando la loss su dati suoi, senza sapere chi è membro. Con ε = 512 il minimo resta 2.6e-2-4.4e-2,
+con ε = 64 5e-2-1.5e-1: il rumore impedisce di ricostruire il modello. Lettura per il paper, provvisoria finché non
+arrivano i seed 456 e 789 (quarta macchina) e le run RX (Windows): il taglio da solo non protegge da un attaccante che
+conosce il riferimento e riscala l'update; il rumore sì, per questo attaccante già a ε = 512.
+
+Quarta macchina (seed 456 e 789, griglia 1,2,4,8,12,16,20,24,32): 7 run su 16 l'11 ottobre mattina. Il 10 sera il Mac si
+è spento a metà della terza run (nessuno spegnimento ordinato nel registro); al rilancio la coda è partita due volte e le
+due copie hanno calcolato insieme le stesse run fino all'11 alle 08:5x, quando una è stata fermata. Cinque cartelle hanno
+quindi due JSON: all'import si controlla che coincidano e se ne tiene uno. Windows (RX): 7 run su 8 l'11 ottobre mattina.
+
+**Riproducibilità fra macchine (2026-10-10).** Sulla stessa macchina le run si ripetono cifra per cifra (le 24 run sopra
+con s = 1). Fra macchine no. Seed 1234, Windows contro Mac principale: norma di Office 1 al round 1 16.90 contro 16.09
+(braccio A), 14.52 contro 14.48 (B); somme A+B con solo taglio 0.99, 1.0175, 1.0575 contro 1.008, 1.018, 1.038; con
+ε = 512 0.995, 0.985, 0.99 contro 1.008, 0.990, 1.035. Scarto massimo 0.045, contro un segnale senza DP di 1.38-1.58:
+stessa conclusione. Causa: processori diversi (Apple ARM e x86) e librerie numeriche che sommano in ordine diverso;
+PyTorch non garantisce risultati identici fra piattaforme. Regola (già in `STATO.md`): ogni confronto fra condizioni si
+fa fra run della stessa macchina; le run di un'altra macchina sullo stesso seed sono repliche. Per il seed 1234 le
+tabelle usano il Mac principale. Da aggiungere ai JSON: versione di torch e tipo di processore.
+
 **Pilota canary su A3, seed 1234 sul Mac principale (comando del 2026-10-07, previsione W1-W3 sopra).** Stesso protocollo
 e stessa previsione dei seed di Windows; con questo seed il pilota arriva a cinque seed. Circa 5 ore.
 
