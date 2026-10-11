@@ -1853,6 +1853,39 @@ PyTorch non garantisce risultati identici fra piattaforme. Regola (già in `STAT
 fa fra run della stessa macchina; le run di un'altra macchina sullo stesso seed sono repliche. Per il seed 1234 le
 tabelle usano il Mac principale. Da aggiungere ai JSON: versione di torch e tipo di processore.
 
+**Griglia fitta con il rumore (Mac principale, lanciata il 2026-10-11).** Domanda: il rumore protegge davvero, o la
+griglia 1-32 ha mancato il fattore giusto? Con solo taglio il segnale torna solo se s è vicino alla norma vera
+dell'update (seed 123, sopra), quindi con il rumore va provato un s fitto attorno a 14-21. Stesse run di prima con ε = 512
+ed ε = 64, seed 42, 123, 1234, bracci A e B, griglia 1, 4, 8, 10, 12-22 a passo 1, 24, 26, 28, 32, 40; cartelle `RF`.
+Nessun codice nuovo. Il solo taglio con s fitto è su Windows (RX). Statistica: somma A+B della loss grezza al round 1
+con l's scelto dall'attaccante senza etichette, cioè quello che minimizza la loss media su tutti i canary, membri e
+non-membri insieme (media pesata con i conteggi di `canary_raw_confusion`, 620 e 40). Il massimo sulla griglia si
+riporta ma non decide (più di 20 confronti). Previsione, scritta prima del lancio. (F1) ε = 64: nessun segnale, somme fra
+0.85 e 1.15 all's scelto in ogni seed. (F2) ε = 512: all's scelto somma sotto 1.15 in ogni seed. Se ε = 512 dà segnale
+vicino alla norma vera, la protezione a ε = 512 è più debole di quanto letto sulla griglia larga e la frase del paper
+resta al punto operativo ε = 64. (F3) Controllo: con s = 1 ogni run riproduce le run R e A3 dello stesso seed e
+condizione. 12 run, circa 15 ore:
+
+```bash
+cd ~/Documents/ChargeShield-FL && git status --porcelain && git log --oneline -1 && nohup caffeinate -ims bash -c '
+set -e
+for m in e512 e64; do for s in 42 123 1234; do for c in multisite multisite_swap; do
+  d=_canary_${c}_RF${m}_s$s
+  [ -e experiments/$d/.fatto ] && continue
+  case $m in e64) dp="--dp-mode local --epsilon 64";; e512) dp="--dp-mode local --epsilon 512";; esac
+  python3 scripts/run_experiments.py --config config/experiment_canary_$c.yaml $dp --seed $s --n-shadow 2 --shadow-epochs-cap 20 --skip-attacks shadow --canary-rescale 1,4,8,10,12,13,14,15,16,17,18,19,20,21,22,24,26,28,32,40 --sweep-dir experiments/$d >> logs/canary_A3_rescale_fine.log 2>&1
+  touch experiments/$d/.fatto
+done; done; done
+' < /dev/null > logs/coda_canary_A3_rescale_fine.log 2>&1 & disown
+```
+
+**Da programmare dopo i canary (richiesta del 2026-10-11).** (1) Validazione sul deployment NVFLARE e Containerlab
+(sezione "Validazione sul deployment" sotto): Mac principale, occupa la macchina, quindi va dopo le code sui canary.
+(2) ChargePlace Scotland come secondo dataset: esistono `config/experiment_chargeplace_scotland.yaml` e
+`config/experiment_canary_positive_control_chargeplace_scotland.yaml` e una sola run di prova; oggi `STATO.md` lo mette
+fra il lavoro futuro, fuori dal paper. Prima di lanciare: decidere se entra nel paper o nella tesi, controllare i dati
+(`datasets/alt/chargeplace_scotland/`) e cosa sono i nodi della federazione, poi scrivere comando e previsione qui.
+
 **Pilota canary su A3, seed 1234 sul Mac principale (comando del 2026-10-07, previsione W1-W3 sopra).** Stesso protocollo
 e stessa previsione dei seed di Windows; con questo seed il pilota arriva a cinque seed. Circa 5 ore.
 
