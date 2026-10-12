@@ -1917,7 +1917,7 @@ Con il rumore al punto operativo ε = 64 il segnale non torna in quattro seed su
 a ε = 512 nessun segnale nel verso atteso. Limiti: un solo attaccante adattivo (riscalamento); seed su tre macchine, con i
 confronti fra condizioni sempre sulla stessa macchina.
 
-**Seed 456 a ε = 64 con s piccoli (quarta macchina, da lanciare).** Domanda: il 1.195 a s = 2 è caso o un
+**Seed 456 a ε = 64 con s piccoli (Mac di Domenico, lanciato e completato il 2026-10-12).** Domanda: il 1.195 a s = 2 è caso o un
 segnale residuo? Stesse run R del seed 456 a ε = 64, bracci A e B, griglia 1, 1.25, 1.5, 1.75, 2, 2.25, 2.5, 3, 3.5, 4, 6;
 cartelle `RG`. Previsione, scritta prima. (G1) Controllo: s = 1 e s = 2 riproducono 1.015 e 1.195 (stessa macchina, stesso
 seed). (G2) Se è caso, a s = 1.5, 1.75, 2.25, 2.5 le somme stanno fra 0.85 e 1.15; se è un segnale residuo, salgono insieme
@@ -1934,6 +1934,17 @@ for c in multisite multisite_swap; do
 done
 ' < /dev/null > logs/coda_canary_A3_rescale_dom_g.log 2>&1 & disown
 ```
+
+Esito (2026-10-12, Mac di Domenico, `_canary_multisite_RGe64_s456` e `_canary_multisite_swap_RGe64_s456`,
+commit 6acc19f, zero Traceback). Somma A+B = AUC del braccio multisite più quella dello swap, al round 1, come
+nel resto del documento. G1 regge: s = 1 dà 0.46 + 0.555 = 1.015 e s = 2 dà 0.595 + 0.600 = 1.195, gli stessi
+valori della run precedente sul seed 456, quindi la riproduzione vale anche fra macchine per questo seed. G2 regge
+nel ramo "caso": a s = 1.5, 1.75, 2.25, 2.5 le somme sono 0.93, 1.02, 1.08, 0.99, dentro 0.85-1.15. Il ramo
+"segnale residuo" non si vede: le somme non salgono insieme sopra 1.1 attorno a 2, perché a s = 2 il valore 1.195 è
+un punto isolato con vicini a 1.02 e 1.08. Limiti: solo il round 1 (come nel documento); ai round 2 e 3 il picco
+non compare nemmeno nelle AUC per round; il LiRA composto sulle tre round resta 0.492-0.493. Lettura: il picco a
+s = 2 non è un segnale residuo stabile al punto operativo, ma il rischio di un caso su 3 seed resta da chiudere con
+i bracci senza DP dello stesso seed.
 
 **Da programmare dopo i canary (richiesta del 2026-10-11).** (1) Validazione sul deployment NVFLARE e Containerlab
 (sezione "Validazione sul deployment" sotto): Mac principale, occupa la macchina, quindi va dopo le code sui canary.
@@ -1964,10 +1975,61 @@ done
 
 **Non previsto.** FedProx sulla DP per record, sull'intera griglia di ε o nelle campagne canary; superficie A2.
 
+## Validazione della metodologia oltre ACN (decisa il 2026-10-12, da portare al supervisore)
+
+**Scopo.** ACN-Data resta la base del lavoro e il risultato principale del paper e della tesi. Gli altri
+dataset servono a mostrare che la metodologia regge in scenari diversi di ricarica EV (altri siti, più
+client, dati più eterogenei), non a sostituire ACN. Ogni passo si fa solo se aggiunge qualcosa che il passo
+precedente non dà; una semplice replica non basta.
+
+**Ordine.**
+1. Chiudere ACN.
+2. Scotland: replica ridotta delle celle che reggono le conclusioni.
+3. Dataset sintetico, solo per la curva di sensibilità dell'auditor.
+4. Validazione sul deployment NVFlare/Containerlab, in scala ridotta (sezione "Validazione sul deployment").
+5. Se resta tempo: un altro dataset reale EV oppure un altro dominio OT/ICS (per esempio CIC Modbus 2023 o
+   HAI).
+
+**1. Chiudere ACN.** Le voci aperte sono nelle sezioni sopra (fra queste il seed 456 a ε = 64 con s piccoli,
+da lanciare, e i bracci senza DP del seed 456). Prima di passare a Scotland serve un elenco unico delle celle
+mancanti, con intervalli di confidenza e TOST calcolati sui risultati finali.
+
+**2. Scotland (ChargePlace Scotland, Strathclyde).** Cosa aggiunge: molti client (per esempio uno per local
+authority), contro i tre siti di ACN; risponde al limite dei pochi client, rilevante per la DP per client
+perché l'aggregato combina pochi contributi.
+- Dati già scaricati in `datasets/alt/chargeplace_scotland/` (fuori da git, `.gitignore`): sessioni mensili da
+  ottobre 2022 a marzo 2024 (`Sessions_from_CPS/`, 18 file), anagrafica dei charger (`CPID_information/`: local
+  authority, postcode, velocità) e popolazioni (`Population_data/`). Fonte: Strathclyde, DOI 10.15129/1f431af7-5caa-4840-a9ab-c1f3b521e033
+  (confermata il 2026-10-12, `PROVENIENZA.txt` nella cartella).
+- Prerequisiti: verificare la licenza; preprocessing con le stesse feature di ACN dove esistono;
+  partizione in client da decidere e motivare (local authority o area di postcode).
+- Stesso modello, stesso auditor, stesse regole di questo documento. Il punto operativo (C = 1, ε = 64) non si
+  ricalibra: si prova la stessa configurazione e se ne misura il costo.
+- Pilota: 1 seed senza DP, per misurare il tempo di una run e verificare che il modello impari.
+- Celle, 3 seed (42, 123, 1234): (a) senza DP; (b) solo taglio a C = 1; (c) DP per client al punto operativo,
+  `local` (attaccante su A3); (d) canary come controllo positivo, bracci A e B con scambio dei ruoli, nelle
+  condizioni (a) e (c). Totale 9 run nel regime naturale e 12 canary, più il pilota.
+- Tempi: su ACN una run costa circa 1-1.25 ore sul Mac principale; con più client e più dati sarà di più. Il
+  tempo vero si misura con il pilota.
+- Le previsioni si scrivono qui prima del pilota, come per le altre voci.
+
+**3. Dataset sintetico.** Si fa solo se dà ciò che il canary non dà. Il canary dice se l'auditor vede una
+memorizzazione forte (sì o no). Un generatore permette di regolare quanto sono distintivi i membri e di
+misurare da quale intensità l'auditor rileva il segnale, con e senza DP: è il dato che serve per interpretare
+un AUC vicino a 0.5. Permette anche di variare in modo controllato il numero di client e l'eterogeneità. Il
+generatore (proprio, ACN-Sim o datafev) si sceglie dopo Scotland.
+
+**4. Deployment.** Prima di qualunque dataset nuovo. Celle e criterio sono nella sezione "Validazione sul
+deployment".
+
+**Macchine.** Ogni blocco seed × condizione va su una sola macchina; i confronti fra condizioni si fanno solo
+dentro la stessa macchina.
+
 ## Rinviato o escluso
 
 RQ4 (rilevamento della MIA passiva) esclusa per threat model. ByzantineDetector
-end-to-end, secondo dataset, adaptive clipping: lavoro futuro dichiarato. Le
+end-to-end e adaptive clipping: lavoro futuro dichiarato. Il secondo dataset è nella
+sezione "Validazione della metodologia oltre ACN". Le
 indagini su LiRA (floor per record, scoring simmetrico) si fanno sulla cella
 canary bilanciata a Office 1, dove la verità è nota, e non toccano la pipeline
 finché E-A ed E-B non sono chiusi.
