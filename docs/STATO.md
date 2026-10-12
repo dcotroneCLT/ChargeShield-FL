@@ -266,6 +266,12 @@ solo taglio, quindi l'attaccante può trovare s senza etichette. Lettura provvis
 attaccante che riscala; il rumore sì. In attesa: seed 456 e 789 (quarta macchina), s fitto fra 12 e 32 (Windows).
 Fra macchine i numeri non coincidono cifra per cifra (seed 1234, scarto massimo 0.045 fra Windows e Mac): si confrontano
 condizioni solo dentro la stessa macchina (`ESPERIMENTI.md`).
+Esito a cinque seed (2026-10-12, griglia fitta sul Mac principale, s fitto su Windows, seed 456 e 789 sulla quarta
+macchina): con solo taglio l'attaccante trova senza etichette l's uguale alla norma dell'update e il segnale torna in
+cinque seed su cinque (1.16-1.52, senza DP 1.38-1.58); con ε = 64 non torna in quattro seed su cinque (1.00-1.08), nel
+seed 456 resta 1.195; con ε = 512 nessun segnale nel verso atteso (0.98-1.12). Il calo sotto 1 visto a ε = 512 nel seed 42
+non si ripete sugli altri seed. Frase per il paper: il taglio da solo non protegge da un attaccante che riscala; il rumore
+al punto operativo toglie quasi tutto il segnale.
 
 **Canary bilanciato su Caltech, seed 42 (2026-10-01, Mac principale,
 `experiments/_canary_balanced_caltech_s42` e `_canary_balanced_caltech_swap_s42`, commit 11c7fdf e

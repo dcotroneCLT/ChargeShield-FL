@@ -1879,6 +1879,62 @@ done; done; done
 ' < /dev/null > logs/coda_canary_A3_rescale_fine.log 2>&1 & disown
 ```
 
+**Esiti del 2026-10-12: griglia fitta (Mac principale), RX (Windows), seed 456 e 789 (quarta macchina).** Griglia
+fitta: 12 run su 12, dall'11 ottobre alle 09:59 al 12 alle 01:09, commit a95574d pulito, zero Traceback; con s = 1 ogni run
+riproduce cifra per cifra la run R dello stesso seed e condizione (F3 regge). Windows, RX: 8 run su 8 (solo taglio con s
+fitto sui seed 42, 123, 1234; senza DP sul 123), commit 6acc19f pulito, zero errori. Quarta macchina: 16 run su 16 (solo
+taglio, ε = 64, ε = 512, senza DP; seed 456 e 789; griglia 1, 2, 4, 8, 12, 16, 20, 24, 32), commit 6acc19f pulito, zero
+Traceback; 10 run calcolate due volte da due copie della coda, i due JSON coincidono in tutto tranne il tempo di calcolo
+dell'auditor (tenuto il primo, `PROVENIENZA.txt`); con s = 1 riproduce le run già salvate dello stesso seed (solo taglio
+456: 1.0025; ε = 64 456: 1.015; senza DP 456: 1.555). Tutte le somme sotto sono A+B della loss grezza al round 1; "s scelto"
+è quello che minimizza la loss media su tutti i canary, membri e non-membri insieme, senza etichette.
+
+Solo taglio. L's scelto coincide con la norma vera dell'update in ogni braccio dove la griglia la contiene (Windows: 16/14,
+22/22, 16/14 contro norme 15.8/13.8, 21.1/21.2, 16.9/14.5; quarta macchina: 16/16 contro 16.2/14.3 e 16.0/14.6). Somma
+all's scelto: 1.465 (42, Windows), 1.155 (123, Windows), 1.177 (1234, Windows), 1.353 (456), 1.393 (789); sul Mac
+principale a s = 16: 1.518 (42), 1.335 (1234). Senza DP 1.38-1.58. Il segnale torna in cinque seed su cinque; nel 123 solo
+con s vicino a 21 e più debole. (R1) Regge in quattro seed su cinque con s = 16 (nel 123 la norma è 21).
+
+ε = 64. Somma all's scelto: 1.008 (42), 1.083 (123), 1.005 (1234) sulla griglia fitta; 1.195 (456, s = 2) e 1.002 (789)
+sulla griglia larga. (F1) Regge nei tre seed della griglia fitta. Nel seed 456 la stessa regola dà 1.195, sopra 1.15:
+resta un segnale moderato, circa un terzo di quello senza DP (1.555), a s = 2 e non vicino alla norma; sugli altri s dello
+stesso seed i valori vanno da 0.79 a 1.0. Lettura: al punto operativo il riscalamento non recupera il segnale in quattro
+seed su cinque; nel quinto ne resta una parte. Nel paper: il rumore a ε = 64 toglie quasi tutto il segnale, non "sempre
+tutto". Da controllare: griglia fitta a s piccoli (1-4) sul seed 456, sulla quarta macchina.
+
+ε = 512. Somma all's scelto: 0.99 (42), 0.978 (123), 1.12 (1234), 1.018 (456), 1.123 (789): nessun segnale nel verso
+atteso (F2 regge). Il calo sotto 1 vicino alla norma (0.625 a s = 17 nel 42, 0.752 a s = 20 nel 123, 0.927 a s = 19 nel
+1234) non si ripete sui seed nuovi. Attaccante che conosce il verso, simulato sui JSON (s = r volte l's scelto, r e verso
+imparati su altri seed): lasciando fuori un seed del Mac 0.670 (42), 0.903 (123), 1.028 (1234); calibrato sui tre seed del
+Mac (r = 1.4, verso invertito) e provato sui seed nuovi 1.025 (456) e 0.980 (789). Non si trasferisce: il calo è forte solo
+nel seed 42 e non lo tratto come fuga di informazione. Ipotesi sul meccanismo, non provata: i canary duplicati stanno in
+un minimo stretto e una perturbazione (rumore o riscalamento oltre l'update vero; senza DP, seed 42, s = 8: 0.722) alza la
+loss dei membri più di quella dei non-membri. Attaccante "di sensibilità" proposto, non implementato.
+
+Lettura per il paper. Il solo taglio non protegge: un attaccante che conosce il modello inviato e ha dati propri trova senza
+etichette il fattore che annulla il taglio, e il segnale torna in cinque seed su cinque (1.16-1.52, senza DP 1.38-1.58).
+Con il rumore al punto operativo ε = 64 il segnale non torna in quattro seed su cinque e nel quinto ne resta circa un terzo;
+a ε = 512 nessun segnale nel verso atteso. Limiti: un solo attaccante adattivo (riscalamento); seed su tre macchine, con i
+confronti fra condizioni sempre sulla stessa macchina.
+
+**Seed 456 a ε = 64 con s piccoli (quarta macchina, da lanciare).** Domanda: il 1.195 a s = 2 è caso o un
+segnale residuo? Stesse run R del seed 456 a ε = 64, bracci A e B, griglia 1, 1.25, 1.5, 1.75, 2, 2.25, 2.5, 3, 3.5, 4, 6;
+cartelle `RG`. Previsione, scritta prima. (G1) Controllo: s = 1 e s = 2 riproducono 1.015 e 1.195 (stessa macchina, stesso
+seed). (G2) Se è caso, a s = 1.5, 1.75, 2.25, 2.5 le somme stanno fra 0.85 e 1.15; se è un segnale residuo, salgono insieme
+sopra 1.1 attorno a 2. 2 run, circa 3 ore e mezza:
+
+```bash
+cd ~/ChargeShield-FL && source .venv/bin/activate && git fetch origin && git merge --ff-only origin/master && git status --porcelain && git log --oneline -1 && nohup caffeinate -ims bash -c '
+set -e
+for c in multisite multisite_swap; do
+  d=_canary_${c}_RGe64_s456
+  [ -e experiments/$d/.fatto ] && continue
+  python3 scripts/run_experiments.py --config config/experiment_canary_$c.yaml --dp-mode local --epsilon 64 --seed 456 --n-shadow 2 --shadow-epochs-cap 20 --skip-attacks shadow --canary-rescale 1,1.25,1.5,1.75,2,2.25,2.5,3,3.5,4,6 --sweep-dir experiments/$d >> logs/canary_A3_rescale_dom_g.log 2>&1
+  touch experiments/$d/.fatto
+done
+' < /dev/null > logs/coda_canary_A3_rescale_dom_g.log 2>&1 & disown
+```
+
 **Da programmare dopo i canary (richiesta del 2026-10-11).** (1) Validazione sul deployment NVFLARE e Containerlab
 (sezione "Validazione sul deployment" sotto): Mac principale, occupa la macchina, quindi va dopo le code sui canary.
 (2) ChargePlace Scotland come secondo dataset: esistono `config/experiment_chargeplace_scotland.yaml` e
