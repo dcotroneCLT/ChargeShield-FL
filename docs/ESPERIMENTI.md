@@ -1946,6 +1946,13 @@ non compare nemmeno nelle AUC per round; il LiRA composto sulle tre round resta 
 s = 2 non è un segnale residuo stabile al punto operativo, ma il rischio di un caso su 3 seed resta da chiudere con
 i bracci senza DP dello stesso seed.
 
+Riepilogo dei quattro bracci del seed 456 sul Mac di Domenico (2026-10-12, `summary` dei JSON; rischio LOW in tutti):
+multisite A3 AUC 0.4998, LiRA 0.4993; swap A3 AUC 0.5032, LiRA 0.4961; multisite senza DP AUC 0.5032, LiRA 0.4942;
+swap senza DP AUC 0.5069, LiRA 0.4962. Lettura: questi campi sono l'attacco sulle sessioni ordinarie, e restano al caso
+anche senza DP, come nel regime naturale. Il segnale del canary sta nei campi `canary_*` di `per_round`, non nel
+riepilogo: quei valori per round sono quelli citati sopra (round 1 e somme A+B). Il riepilogo da solo non prova né
+esclude il leakage del canary.
+
 **Da programmare dopo i canary (richiesta del 2026-10-11).** (1) Validazione sul deployment NVFLARE e Containerlab
 (sezione "Validazione sul deployment" sotto): Mac principale, occupa la macchina, quindi va dopo le code sui canary.
 (2) ChargePlace Scotland come secondo dataset: esistono `config/experiment_chargeplace_scotland.yaml` e
