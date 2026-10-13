@@ -1,0 +1,58 @@
+# ChargeShield-FL — ACN-Data, 3 siti, DP a livello di SOGGETTO (utente)
+# Creato il 2026-10-13 da config/experiment.yaml (stesso protocollo del regime
+# naturale). Meccanismo e accounting: src/ml/subject_dp.py.
+#
+# Soggetto = userID. Le sessioni senza userID (27% del totale: Caltech 48%,
+# JPL 6.5%, Office 1 65%) sono soggetti singoli. 87 utenti compaiono in piu'
+# siti: il loro contributo in ogni sito e' tagliato a C * w, w = loro sessioni
+# nel sito / totali, e l'accountant somma le RDP sui siti (campo
+# epsilon_subject_dp_multi_client nel JSON).
+#
+# Si lancia con --no-dp. sigma da scegliere dopo il primo test: il JSON riporta
+# epsilon per client e per i soggetti su piu' siti.
+
+experiment:
+  name: chargeshield_acn_subjectdp
+  fl_rounds: 10
+  seed: 42
+  epsilon: 1.0
+  delta: 1.0e-05
+  max_grad_norm: 1.0
+sites:
+  caltech:
+  - datasets/acn/caltech/acndata_sessions_2018.json
+  - datasets/acn/caltech/acndata_sessions_2019.json
+  - datasets/acn/caltech/acndata_sessions_2020.json
+  - datasets/acn/caltech/acndata_sessions_2021.json
+  jpl:
+  - datasets/acn/jpl/acndata_sessions_2018.json
+  - datasets/acn/jpl/acndata_sessions_2019.json
+  - datasets/acn/jpl/acndata_sessions_2020.json
+  - datasets/acn/jpl/acndata_sessions_2021.json
+  office1:
+  - datasets/acn/office1/acndata_sessions_2019.json
+  - datasets/acn/office1/acndata_sessions_2020.json
+  - datasets/acn/office1/acndata_sessions_2021.json
+ml:
+  input_dim: 6
+  lr: 0.001
+  epochs: 50
+  batch_size: 32
+  proximal_mu: 0.01
+  norm: group
+  subject_dp:
+    enabled: true
+    subject_key: user_id
+    max_grad_norm: 1.0
+    noise_multiplier: 2.0
+    expected_subjects_per_step: 32
+    max_records_per_subject: 64
+output:
+  experiments_dir: experiments
+lira:
+  n_shadow: 16
+byzantine_attack:
+  enabled: false
+  attack_type: gradient_scaling
+  byzantine_node: synthetic_1
+  scale_factor: 10

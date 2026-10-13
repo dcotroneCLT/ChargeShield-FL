@@ -11,12 +11,14 @@
 from __future__ import annotations
 
 import logging
+import zlib
 from typing import Any
 
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
 from core.autoencoder import Autoencoder
+from ml.subject_dp import row_valid, sampling_schedule, subject_dp_config, subject_ids
 from ml.base_ml import (
     AbstractMLModel,
     AggregatedUpdate,
@@ -114,6 +116,33 @@ class AutoencoderTrainer(AbstractMLModel):
             )
         self._global_weights: list[Any] | None = None
 
+        # ── DP a livello di SOGGETTO (2026-10-13) ─────────────────────────────
+        # Opt-in via cfg["ml"]["subject_dp"]; assente o enabled=False => blocco
+        # inerte e comportamento invariato. Meccanismo, accounting e definizione
+        # di soggetto in src/ml/subject_dp.py. Alternativa alla DP per record,
+        # non combinabile con essa: le due unita' protette sono diverse.
+        self.subject_dp: dict[str, Any] = subject_dp_config(config)
+        self.subject_dp_enabled: bool = self.subject_dp["enabled"]
+        if self.subject_dp_enabled and self.record_dp_enabled:
+            raise ValueError(
+                "config['ml']: record_dp e subject_dp non possono essere attivi "
+                "insieme (proteggono unita' diverse; scegliere una cella per volta)"
+            )
+        if self.subject_dp_enabled:
+            if float(self.subject_dp["max_grad_norm"]) <= 0.0:
+                raise ValueError(
+                    "config['ml']['subject_dp']['max_grad_norm'] deve essere > 0 "
+                    f"(ricevuto {self.subject_dp['max_grad_norm']})"
+                )
+            if int(self.subject_dp["max_records_per_subject"]) < 1:
+                raise ValueError(
+                    "config['ml']['subject_dp']['max_records_per_subject'] deve essere >= 1"
+                )
+        # Pesi dei soggetti presenti in piu' client ({soggetto: w}, w < 1),
+        # impostati da run_fl_rounds() con set_subject_weights(). Assente => 1.
+        self._subject_weights: dict[str, float] = {}
+        self.subject_dp_last: dict[str, Any] | None = None
+
         # Seed per DataLoader shuffle deterministico (riproducibilità DSN 2027)
         self._seed: int = config.get("seed", 42)
 
@@ -150,6 +179,14 @@ class AutoencoderTrainer(AbstractMLModel):
                 "forzato a 'group'. BatchNorm richiede batch>1 e non limita la "
                 "sensibilita' per-record. Dichiarare norm: group in config per "
                 "rendere la scelta esplicita.", _norm
+            )
+            _norm = "group"
+        if self.subject_dp_enabled and _norm != "group":
+            # Stesso motivo: il gradiente di un soggetto si calcola sulle sole
+            # sue sessioni (anche una sola), e BatchNorm non lo permette.
+            logger.warning(
+                "[SUBJECT-DP] norm=%r incompatibile con il clipping per soggetto: "
+                "forzato a 'group'. Dichiarare norm: group in config.", _norm
             )
             _norm = "group"
         self.norm: str = _norm
@@ -309,6 +346,122 @@ class AutoencoderTrainer(AbstractMLModel):
         self.optimizer.step()
         return loss_totale / n
 
+    # ── DP a livello di soggetto ─────────────────────────────────────────────
+
+    def set_subject_weights(self, weights: dict[str, float]) -> None:
+        """Pesi dei soggetti presenti anche in altri client (w < 1); gli altri
+        soggetti hanno peso 1. Vedi src/ml/subject_dp.py."""
+        self._subject_weights = dict(weights or {})
+
+    def _subject_clipped_sum(
+        self,
+        tensor: torch.Tensor,
+        rows_per_subject: list[torch.Tensor],
+        weights: list[float],
+        seeds: list[int],
+    ) -> tuple[list[torch.Tensor], list[float]]:
+        """Somma dei gradienti tagliati dei soggetti estratti, SENZA rumore.
+
+        Per ogni soggetto: al piu' max_records_per_subject sue sessioni (scelte
+        a caso se sono di piu'), gradiente della loss media su quelle, taglio a
+        norma C * w. Il contributo di un soggetto alla somma ha quindi norma
+        <= C * w per costruzione, qualunque sia il numero delle sue sessioni:
+        e' la condizione perche' l'adiacenza sia a livello di soggetto.
+        La scelta dei record usa un generatore per soggetto (`seeds`), cosi'
+        il contributo di un soggetto non dipende da quali altri soggetti sono
+        nel lotto ne' da quante sessioni hanno.
+        Il termine prossimale FedProx non entra qui (non dipende dai dati).
+        """
+        params = [p for p in self.model.parameters() if p.requires_grad]
+        somma = [torch.zeros_like(p) for p in params]
+        losses: list[float] = []
+        C = float(self.subject_dp["max_grad_norm"])
+        m = int(self.subject_dp["max_records_per_subject"])
+        for rows, w, sd in zip(rows_per_subject, weights, seeds):
+            if rows.numel() > m:
+                g = torch.Generator().manual_seed(int(sd))
+                rows = rows[torch.randperm(rows.numel(), generator=g)[:m]]
+            x = tensor[rows].to(self.device)
+            self.optimizer.zero_grad(set_to_none=True)
+            loss = self.criterion(self.model(x), x)
+            loss.backward()
+            losses.append(float(loss.item()))
+            norma = torch.sqrt(
+                sum((p.grad.detach() ** 2).sum() for p in params if p.grad is not None)
+            )
+            scala = min(1.0, (C * float(w)) / float(norma.item() + 1e-12))
+            for acc, p in zip(somma, params):
+                if p.grad is not None:
+                    acc.add_(p.grad.detach() * scala)
+        return somma, losses
+
+    def _train_local_subject_dp(
+        self,
+        tensor: torch.Tensor,
+        subjects: list[str],
+        round_num: int,
+    ) -> list[float]:
+        """Training locale con DP-SGD a livello di soggetto (vedi
+        src/ml/subject_dp.py). Restituisce la loss media di ogni epoca."""
+        self.model.train()
+        gruppi: dict[str, list[int]] = {}
+        for i, s in enumerate(subjects):
+            gruppi.setdefault(s, []).append(i)
+        nomi = list(gruppi)
+        n_subj = len(nomi)
+        rows = [torch.tensor(gruppi[s], dtype=torch.long) for s in nomi]
+        pesi = [float(self._subject_weights.get(s, 1.0)) for s in nomi]
+        expected = int(self.subject_dp["expected_subjects_per_step"])
+        q, per_epoch = sampling_schedule(n_subj, expected)
+        # Denominatore COSTANTE (numero atteso di soggetti per passo), anche
+        # con q = 1: dividere per N renderebbe la scala del passo, e quindi
+        # l'effetto di FedProx e dell'eps di Adam, dipendente dai dati.
+        denom = float(max(1, expected))
+        self.subject_dp_last = {"n_soggetti": n_subj, "q": q, "passi_per_epoca": per_epoch}
+        sigma = float(self.subject_dp["noise_multiplier"])
+        C = float(self.subject_dp["max_grad_norm"])
+        # Generatore dedicato al campionamento dei soggetti e dei record: non
+        # consuma il generatore globale (che governa il rumore, come per la DP
+        # per record) e dipende da seed e round come lo shuffle storico.
+        # crc32 del client: client diversi hanno campionamenti indipendenti
+        # (la somma delle RDP fra client lo presuppone).
+        gen = torch.Generator().manual_seed(
+            self._seed + 104729 * round_num + 7919 + zlib.crc32(self.cluster_id.encode()))
+        logger.info(
+            f"[SUBJECT-DP] [{self.node_id}] round {round_num}: {n_subj} soggetti, "
+            f"q={q:.4g}, {per_epoch} passi per epoca, sigma={sigma}, C={C}, "
+            f"pesi < 1: {sum(1 for w in pesi if w < 1.0)}"
+        )
+        params = [p for p in self.model.parameters() if p.requires_grad]
+        epoch_losses: list[float] = []
+        passo = 0
+        for _epoch in range(self.epochs):
+            step_losses: list[float] = []
+            for _step in range(per_epoch):
+                passo += 1
+                scelti = (torch.rand(n_subj, generator=gen) < q).nonzero().flatten().tolist()
+                base = self._seed + 1_000_003 * (round_num * 100_003 + passo)
+                somma, losses = self._subject_clipped_sum(
+                    tensor, [rows[i] for i in scelti], [pesi[i] for i in scelti],
+                    [base + i for i in scelti])
+                step_losses.extend(losses)
+                # Il passo si fa anche se nessun soggetto e' stato estratto:
+                # con Poisson il rilascio rumoroso avviene comunque.
+                self.optimizer.zero_grad(set_to_none=True)
+                for idx, (acc, p) in enumerate(zip(somma, params)):
+                    g = acc
+                    if sigma > 0.0:
+                        g = g + torch.normal(mean=0.0, std=sigma * C, size=g.shape, device=g.device)
+                    g = g / float(denom)
+                    if self.proximal_mu > 0.0 and self._global_weights is not None:
+                        if idx < len(self._global_weights):
+                            g = g + self.proximal_mu * (p.detach() - self._global_weights[idx])
+                    p.grad = g
+                self.optimizer.step()
+            if step_losses:
+                epoch_losses.append(sum(step_losses) / len(step_losses))
+        return epoch_losses
+
     def emit_event(self, event: MLPlaneEvent) -> None:
         for listener in self._listeners:
             listener.on_ml_event(event)
@@ -331,7 +484,11 @@ class AutoencoderTrainer(AbstractMLModel):
         """
         self._current_round = round_num
 
-        tensor = self._sessions_to_tensor(sessions)
+        subjects: list[str] | None = None
+        if self.subject_dp_enabled:
+            tensor, subjects = self._sessions_to_tensor_and_subjects(sessions)
+        else:
+            tensor = self._sessions_to_tensor(sessions)
         if tensor is None:
             logger.warning(f"[{self.node_id}] Nessuna sessione valida — skip training")
             _skip_update = GradientUpdate(
@@ -366,26 +523,31 @@ class AutoencoderTrainer(AbstractMLModel):
             ))
             return _skip_update
 
-        dataset    = TensorDataset(tensor)
-        # Generator con seed determinístico per riproducibilità dello shuffle tra run.
-        # Il seed dipende da round_num per evitare che tutti i round usino lo stesso shuffle.
-        _dl_gen = torch.Generator()
-        _dl_gen.manual_seed(self._seed + round_num)
-        dataloader = DataLoader(
-            dataset, batch_size=self.batch_size, shuffle=True,
-            drop_last=True, generator=_dl_gen,
-        )
-
         epoch_losses: list[float] = []
-        for epoch in range(self.epochs):
-            batch_losses = [self.train_step(batch) for (batch,) in dataloader]
-            if not batch_losses:
-                logger.warning(
-                    f"[{self.node_id}] Epoch {epoch}: nessun batch "
-                    f"(sessioni={len(sessions)}, batch_size={self.batch_size})"
-                )
-                continue
-            epoch_losses.append(sum(batch_losses) / len(batch_losses))
+        if self.subject_dp_enabled:
+            # Campionamento di Poisson dei soggetti al posto del DataLoader
+            # (vedi _train_local_subject_dp e src/ml/subject_dp.py).
+            epoch_losses = self._train_local_subject_dp(tensor, subjects or [], round_num)
+        else:
+            dataset    = TensorDataset(tensor)
+            # Generator con seed determinístico per riproducibilità dello shuffle tra run.
+            # Il seed dipende da round_num per evitare che tutti i round usino lo stesso shuffle.
+            _dl_gen = torch.Generator()
+            _dl_gen.manual_seed(self._seed + round_num)
+            dataloader = DataLoader(
+                dataset, batch_size=self.batch_size, shuffle=True,
+                drop_last=True, generator=_dl_gen,
+            )
+
+            for epoch in range(self.epochs):
+                batch_losses = [self.train_step(batch) for (batch,) in dataloader]
+                if not batch_losses:
+                    logger.warning(
+                        f"[{self.node_id}] Epoch {epoch}: nessun batch "
+                        f"(sessioni={len(sessions)}, batch_size={self.batch_size})"
+                    )
+                    continue
+                epoch_losses.append(sum(batch_losses) / len(batch_losses))
 
         mean_loss = sum(epoch_losses) / len(epoch_losses) if epoch_losses else None
         loss_str = f"{mean_loss:.6f}" if mean_loss is not None else "N/A"
@@ -469,3 +631,24 @@ class AutoencoderTrainer(AbstractMLModel):
                 rows.append(row)
 
         return torch.tensor(rows, dtype=torch.float32) if rows else None
+
+    def _sessions_to_tensor_and_subjects(
+        self,
+        sessions: list[dict[str, Any]],
+    ) -> tuple[torch.Tensor | None, list[str]]:
+        """Come _sessions_to_tensor, ma restituisce anche il soggetto di ogni
+        riga valida. I soggetti si calcolano sulla lista COMPLETA (il fallback
+        dipende dalla posizione e deve coincidere con cross_client_weights)."""
+        ids = subject_ids(sessions, str(self.subject_dp["subject_key"]), self.cluster_id)
+        rows: list[list[float]] = []
+        subj: list[str] = []
+        feats = list(self.CONTINUOUS_FEATURES)
+        for s, sid in zip(sessions, ids):
+            # Stessa regola di _sessions_to_tensor, condivisa con l'accountant
+            # (ml.subject_dp.row_valid): cosi' N coincide nei due punti.
+            if row_valid(s, feats):
+                rows.append([float(s.get(f)) for f in feats])
+                subj.append(sid)
+        if not rows:
+            return None, []
+        return torch.tensor(rows, dtype=torch.float32), subj

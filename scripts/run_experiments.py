@@ -47,6 +47,12 @@ from ml.gradient_manager import GradientManager
 from ml.ml_plane import FLArtifactCollector, MLPlane
 from ml.base_ml import MLPlaneEvent
 from ml.record_dp_accounting import record_dp_fields as _record_dp_fields_impl
+from ml.subject_dp import (
+    cross_client_weights as _subject_cross_client_weights,
+    subject_dp_config as _subject_dp_config,
+    subject_dp_fields as _subject_dp_fields,
+    subject_stats as _subject_stats,
+)
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -161,7 +167,13 @@ def _autoencoder_arch_kwargs(cfg: dict) -> dict[str, Any]:
         # "batch" se il config non lo diceva, e FedMIA/Shadow/LiRA saltavano
         # ogni round ("global_weights ha 16 elementi, state_dict ne richiede
         # 22"). Stessa regola del trainer, cosi' le due architetture coincidono.
-        "norm": ("group" if (ml_cfg.get("record_dp") or {}).get("enabled")
+        # 2026-10-13: stessa regola per la DP per soggetto (il trainer forza
+        # "group" anche li', src/ml/autoencoder_trainer.py).
+        # subject_dp letto con la stessa funzione del trainer (che tratta la
+        # stringa "false" come falso): un bool() diretto darebbe "group" qui e
+        # "batch" nel trainer, e gli attacchi salterebbero per shape mismatch.
+        "norm": ("group" if ((ml_cfg.get("record_dp") or {}).get("enabled")
+                             or _subject_dp_config(ml_cfg)["enabled"])
                  else str(ml_cfg.get("norm", "batch"))),
     }
 
@@ -1247,6 +1259,35 @@ def run_fl_rounds(
             f"{cluster_ids[0]}-01 (ml.common_init: true, segnalazione 48)"
         )
 
+    # DP a livello di soggetto (2026-10-13, src/ml/subject_dp.py): una cella
+    # per volta, come la DP per record. I soggetti presenti in piu' client
+    # ricevono in ogni client un peso w = sessioni nel client / totali, cosi'
+    # che la somma dei loro contributi tagliati sia al piu' C.
+    _sdp = _subject_dp_config(ml_cfg)
+    if _sdp["enabled"]:
+        if not no_dp:
+            raise ValueError(
+                "ml.subject_dp attivo senza --no-dp: la DP per soggetto e quella "
+                "per client non si combinano in questa pipeline (una cella per volta)."
+            )
+        _sint = [c for c in cluster_ids if str(c).startswith("synthetic")]
+        if _sint:
+            raise ValueError(
+                f"ml.subject_dp con client sintetici {_sint}: le loro sessioni sono "
+                "copie di quelle reali, quindi lo stesso soggetto comparirebbe in "
+                "piu' client senza pesi ne' composizione. Disattivare lo sweep IDS."
+            )
+        _sfeat = list(trainers[cluster_ids[0]].CONTINUOUS_FEATURES) if cluster_ids else None
+        _sw = _subject_cross_client_weights(cluster_sessions, str(_sdp["subject_key"]), _sfeat)
+        _sstats_attese = _subject_stats(cluster_sessions, str(_sdp["subject_key"]), _sfeat)
+        for cid in cluster_ids:
+            trainers[cid].set_subject_weights(_sw.get(cid, {}))
+        _n_multi = len({s for per in _sw.values() for s in per})
+        logger.info(
+            f"[SUBJECT-DP] chiave={_sdp['subject_key']!r}, sigma={_sdp['noise_multiplier']}, "
+            f"C={_sdp['max_grad_norm']}, soggetti in piu' client: {_n_multi}"
+        )
+
     gm = GradientManager({
         "epsilon":       exp_cfg["epsilon"],
         "delta":         exp_cfg["delta"],
@@ -1341,6 +1382,18 @@ def run_fl_rounds(
 
             # Training locale
             update = trainer.train_local(cluster_sessions[cid], round_num)
+
+            # DP per soggetto: il numero di soggetti usato dal trainer deve
+            # coincidere con quello dell'accountant, altrimenti l'epsilon nel
+            # JSON non corrisponde a quello che e' stato eseguito.
+            if _sdp["enabled"] and trainer.subject_dp_last is not None:
+                _n_tr = trainer.subject_dp_last["n_soggetti"]
+                _n_acc = _sstats_attese["per_client_subjects"].get(cid)
+                if _n_tr != _n_acc:
+                    raise RuntimeError(
+                        f"[SUBJECT-DP] {cid}: il trainer ha {_n_tr} soggetti, "
+                        f"l'accountant {_n_acc}. Epsilon non affidabile: run fermata."
+                    )
 
             # Norma L2 del delta del client (2026-09-24, solo misura: nessun
             # effetto sul training ne' sulla DP). Serve a scegliere la soglia di
@@ -2937,6 +2990,115 @@ def _rescale_update_weights(
     return out
 
 
+# ── RMIA (2026-10-13) ───────────────────────────────────────────────────────────
+# Zarifzadeh, Liu, Bhatt, Shokri, "Low-Cost High-Power Membership Inference
+# Attacks", ICML 2024. Calcolato dentro run_lira() sugli stessi modelli shadow
+# (nessun addestramento in piu'), ma su TUTTI i campioni con almeno un
+# riferimento: LiRA scarta quelli con meno di 2 shadow OUT, RMIA no.
+#
+# Adattamento all'autoencoder: RMIA usa Pr(x | theta), che per un classificatore
+# e' una probabilita' confrontabile fra modelli. Qui Pr(x | theta) =
+# exp(-L(x) / tau_theta), con L l'errore di ricostruzione e tau_theta la mediana
+# delle loss DI QUEL MODELLO sui campioni del client nel round: ogni modello
+# (bersaglio e ogni shadow) e' normalizzato sulla propria scala. Senza questa
+# normalizzazione, con shadow addestrati meno del bersaglio (--shadow-epochs-cap)
+# lo score diventa una differenza di loss dominata dalla scala degli shadow, e
+# si inverte (verificato su dati sintetici). Per ogni x:
+#   LR(x) = Pr(x | theta) / Pr(x),  Pr(x) = media su TUTTI i riferimenti (IN e
+#           OUT) ("online"), oppure 1/2((1+a) media_OUT + (1-a)) ("offline",
+#           solo OUT, a = RMIA_A_OFFLINE);
+#   score(x) = frazione della popolazione z (i non membri dello stesso client e
+#           round, x escluso) con LR(x) / LR(z) >= gamma.
+# Con gamma = 1 lo score e' monotono in LR(x): l'AUC coincide con quella di
+# LR(x), il confronto con z serve per TPR a FPR bassi e per gamma != 1.
+# Composizione su piu' round: somma di log LR(x) per campione.
+RMIA_A_OFFLINE = 0.3
+RMIA_GAMMA = 1.0
+
+
+def _rmia_scores(rows: list[dict[str, Any]], gamma: float = RMIA_GAMMA,
+                 a: float = RMIA_A_OFFLINE) -> dict[str, list[tuple]]:
+    """Score RMIA per campione. rows: dict con target, refs (lista di
+    (indice shadow, loss, x nel training dello shadow)), member, client,
+    canary, sid. Restituisce {"online": [...], "offline": [...]},
+    liste di (sid, member, canary, score, log_lr)."""
+    from collections import defaultdict as _dd
+    per_client: dict[Any, list[dict[str, Any]]] = _dd(list)
+    for r in rows:
+        per_client[r["client"]].append(r)
+    out: dict[str, list[tuple]] = {"online": [], "offline": []}
+    lg = math.log(gamma)
+    for _cid, rr in per_client.items():
+        t = np.array([r["target"] for r in rr], dtype=float)
+        tau = max(float(np.median(t)), 1e-12)
+        lp_t = -t / tau
+        # scala di ogni shadow: mediana delle sue loss su questi campioni
+        per_mod: dict[Any, list[float]] = _dd(list)
+        for r in rr:
+            for (si, mse, _inn) in r["refs"]:
+                per_mod[si].append(mse)
+        tau_m = {si: max(float(np.median(v)), 1e-12) for si, v in per_mod.items()}
+
+        def _lmean(refs: list[tuple]) -> float:
+            v = np.array([-mse / tau_m[si] for (si, mse, _inn) in refs], dtype=float)
+            m = float(v.max())
+            return m + math.log(float(np.mean(np.exp(v - m))))
+
+        lp_on = np.array([_lmean(r["refs"]) if r["refs"] else np.nan for r in rr])
+        lp_off = np.array([
+            math.log(0.5 * ((1 + a) * math.exp(_lmean([x for x in r["refs"] if not x[2]])) + (1 - a)))
+            if any(not x[2] for x in r["refs"]) else np.nan for r in rr])
+        memb = np.array([bool(r["member"]) for r in rr])
+        for kind, lp_ref in (("online", lp_on), ("offline", lp_off)):
+            llr = lp_t - lp_ref
+            ok = np.isfinite(llr)
+            pop = np.sort(llr[ok & ~memb])
+            for i, r in enumerate(rr):
+                if not ok[i] or len(pop) == 0:
+                    continue
+                cnt = int(np.searchsorted(pop, llr[i] - lg, side="right"))
+                n_pop = len(pop)
+                if not memb[i]:
+                    # x stesso e' nella popolazione: si esclude
+                    if llr[i] - lg >= llr[i]:
+                        cnt -= 1
+                    n_pop -= 1
+                if n_pop <= 0:
+                    continue
+                out[kind].append((r["sid"], bool(r["member"]), r["canary"], cnt / n_pop, float(llr[i])))
+    return out
+
+
+def _rmia_round_fields(rows: list[dict[str, Any]], cumulative: dict[int, float],
+                       cum_member: dict[int, bool], cum_canary: dict[int, Any]) -> dict[str, Any]:
+    """Campi RMIA di un round per lira_results; aggiorna la composizione."""
+    from sklearn.metrics import roc_auc_score as _auc
+    res: dict[str, Any] = {}
+    sc = _rmia_scores(rows)
+    for kind, pref in (("online", "rmia"), ("offline", "rmia_offline")):
+        lst = sc[kind]
+        labels = [1 if m else 0 for (_s, m, _c, _sc, _l) in lst]
+        scores = [s for (_s, _m, _c, s, _l) in lst]
+        res[f"{pref}_n_samples"] = len(lst)
+        if len(set(labels)) == 2:
+            res[f"{pref}_auc_roc"] = round(float(_auc(labels, scores)), 6)
+            for k, v in _tpr_at_fixed_fpr(labels, scores).items():
+                res[f"{pref}_{k}"] = v
+            res[f"{pref}_advantage"] = _mia_advantage(labels, scores)
+        else:
+            res[f"{pref}_auc_roc"] = None
+        can = [(m, s) for (_s, m, c, s, _l) in lst if c is not None]
+        cl = [1 if m else 0 for m, _ in can]
+        res[f"canary_{pref}_auc_roc"] = (round(float(_auc(cl, [s for _, s in can])), 6)
+                                         if len(set(cl)) == 2 else None)
+        if kind == "online":
+            for (sid, m, c, _s, l) in lst:
+                cumulative[sid] = cumulative.get(sid, 0.0) + l
+                cum_member[sid] = m
+                cum_canary[sid] = c
+    return res
+
+
 def run_lira(
     cfg: dict,
     train_sessions: list[dict[str, Any]],
@@ -3710,6 +3872,10 @@ def run_lira(
     # fornito — stesso costo zero-impatto delle altre diagnostiche already
     # esistenti in questa funzione.
     _cumulative_score_counts: dict[int, int] = {}
+    # RMIA (2026-10-13): composizione su piu' round, vedi _rmia_round_fields()
+    _rmia_cumulative: dict[int, float] = {}
+    _rmia_cum_member: dict[int, bool] = {}
+    _rmia_cum_canary: dict[int, Any] = {}
     _sample_is_member:  dict[int, bool]  = {id(s): True for s in members_bal}
     _sample_is_member.update({id(s): False for s in nonmembers_bal})
 
@@ -4244,6 +4410,7 @@ def run_lira(
             global_out_stats_per_cluster[cid] = (mu_o, sigma_o)
 
         round_member_scores:    list[float] = []
+        _rmia_rows: list[dict[str, Any]] = []  # RMIA (2026-10-13)
         round_nonmember_scores: list[float] = []
         # Sprint 10zz+33 (2026-09-03, task #58) — attacco di Sablayrolles
         # et al. 2019 [56] come secondo scorer post-hoc, in parallelo a
@@ -4650,6 +4817,7 @@ def run_lira(
                 _sample_id = id(sample)
                 in_losses:  list[float] = []
                 out_losses: list[float] = []
+                _rmia_refs: list[tuple] = []  # RMIA (2026-10-13)
                 for si, in_set in enumerate(_cluster_shadow_in_sets):
                     if si >= len(_cluster_shadow_mse):
                         continue
@@ -4660,6 +4828,17 @@ def run_lira(
                         in_losses.append(mse)
                     else:
                         out_losses.append(mse)
+                    _rmia_refs.append((si, float(mse), _sample_id in in_set))
+
+                # RMIA (2026-10-13): raccolto PRIMA del filtro di
+                # calibrazione di LiRA; basta un riferimento.
+                if _rmia_refs:
+                    _rmia_rows.append({
+                        "target": target_loss, "refs": _rmia_refs,
+                        "member": bool(is_member),
+                        "client": _client_idx, "sid": id(sample),
+                        "canary": _sample_canary_group.get(id(sample)),
+                    })
 
                 if len(out_losses) < 2:
                     if id(sample) in _sample_canary_group:
@@ -5360,7 +5539,21 @@ def run_lira(
                 f"real_nonmember_mean={_diag_fields.get('lira_debug_real_nonmember_mean', 'N/A')})"
             )
 
+        try:
+            _rmia_fields = _rmia_round_fields(
+                _rmia_rows, _rmia_cumulative, _rmia_cum_member, _rmia_cum_canary)
+        except Exception as _exc:  # noqa: BLE001 - RMIA non deve far perdere LiRA
+            logger.warning(f"RMIA round {round_num} fallito: {_exc}")
+            _rmia_fields = {"rmia_auc_roc": None}
+        logger.info(
+            f"Round {round_num} — RMIA AUC: {_rmia_fields.get('rmia_auc_roc')} "
+            f"(offline {_rmia_fields.get('rmia_offline_auc_roc')}, "
+            f"n={_rmia_fields.get('rmia_n_samples')}, "
+            f"TPR@1%FPR={_rmia_fields.get('rmia_tpr_at_fpr_0.01')}); "
+            f"canary {_rmia_fields.get('canary_rmia_auc_roc')}"
+        )
         lira_results[round_num] = {
+            **_rmia_fields,
             "lira_auc_roc":               round(auc, 6),
             "lira_member_score_mean":     round(float(np.mean(round_member_scores)),    6),
             "lira_non_member_score_mean": round(float(np.mean(round_nonmember_scores)), 6),
@@ -5452,6 +5645,26 @@ def run_lira(
             _member_vals    = [s for _sid, s in _cumulative_scores.items() if _sample_is_member[_sid]]
             _nonmember_vals = [s for _sid, s in _cumulative_scores.items() if not _sample_is_member[_sid]]
             composed_output["composed_lira_auc_roc"] = round(float(_composed_auc), 6)
+            # RMIA composto (2026-10-13): somma dei log LR per campione sui round
+            try:
+                _rl = [1 if _rmia_cum_member[_s] else 0 for _s in _rmia_cumulative]
+                _rs = [_rmia_cumulative[_s] for _s in _rmia_cumulative]
+                composed_output["composed_rmia_auc_roc"] = (
+                    round(float(roc_auc_score(_rl, _rs)), 6) if len(set(_rl)) == 2 else None)
+                for _k, _v in _tpr_at_fixed_fpr(_rl, _rs).items():
+                    composed_output[f"composed_rmia_{_k}"] = _v
+                _rc = [_s for _s in _rmia_cumulative if _rmia_cum_canary.get(_s) is not None]
+                _rcl = [1 if _rmia_cum_member[_s] else 0 for _s in _rc]
+                composed_output["canary_composed_rmia_auc_roc"] = (
+                    round(float(roc_auc_score(_rcl, [_rmia_cumulative[_s] for _s in _rc])), 6)
+                    if len(set(_rcl)) == 2 else None)
+                logger.info(
+                    f"RMIA composto (somma dei log LR sui round) — AUC-ROC: "
+                    f"{composed_output['composed_rmia_auc_roc']}, canary "
+                    f"{composed_output['canary_composed_rmia_auc_roc']}"
+                )
+            except Exception as _exc:  # noqa: BLE001
+                logger.warning(f"RMIA composto fallito: {_exc}")
             composed_output["composed_lira_score_gap"] = round(
                 float(np.mean(_member_vals) - np.mean(_nonmember_vals))
                 if _member_vals and _nonmember_vals else 0.0,
@@ -6194,6 +6407,11 @@ def run_centralized_control(
 
     total_epochs = rounds * local_epochs
     _ml_cfg = {**cfg["ml"], "seed": seed, "epochs": total_epochs}
+    if _subject_dp_config(_ml_cfg)["enabled"]:
+        logger.warning(
+            "[CENTRALIZED CONTROL] ml.subject_dp attivo: il controllo centralizzato "
+            "gira con la DP per soggetto ma senza accounting proprio."
+        )
     trainer = AutoencoderTrainer(
         config=_ml_cfg, node_id="centralized-control", cluster_id="centralized-control",
     )
@@ -6531,6 +6749,12 @@ def run_ids(
     # 1.0, explosion_threshold = Infinity in entrambe.
     _rdp_cfg = (cfg.get("ml", {}) or {}).get("record_dp") or {}
     _rdp_on  = bool(_rdp_cfg.get("enabled"))
+    # 2026-10-13: la DP per soggetto ha lo stesso problema (rumore anche con
+    # --no-dp) e si tratta allo stesso modo, con il suo C e il suo sigma.
+    _sdp_cfg = _subject_dp_config(cfg.get("ml", {}) or {})
+    if _sdp_cfg["enabled"] and not _rdp_on:
+        _rdp_cfg = _sdp_cfg
+        _rdp_on = True
 
     if _rdp_on:
         # Rumore per-esempio: la soglia va calibrata sul clipping PER RECORD e
@@ -6549,8 +6773,10 @@ def run_ids(
         _explosion_thresh = None   # None → formula Gaussian 3-sigma client-level
 
     logger.info(
-        "[AUDITOR] epsilon=%s explosion_threshold=%s (record_dp=%s, no_dp=%s)",
-        _auditor_epsilon, _explosion_thresh, _rdp_on, no_dp,
+        "[AUDITOR] epsilon=%s explosion_threshold=%s (record_dp=%s, subject_dp=%s, no_dp=%s)",
+        _auditor_epsilon, _explosion_thresh,
+        bool(((cfg.get("ml", {}) or {}).get("record_dp") or {}).get("enabled")),
+        _sdp_cfg["enabled"], no_dp,
     )
     auditor = PrivacyAuditor(
         config_path=config_path,
@@ -6685,6 +6911,9 @@ def save_results(
     # {cluster_id: n}. L'accountant record-DP e' per client (q = B/n_i);
     # senza, epsilon_record_dp resta None invece di usare il totale.
     n_train_per_client: dict[str, int] | None = None,
+    # 2026-10-13: statistiche dei soggetti (src/ml/subject_dp.py) per
+    # l'accountant della DP per soggetto. None se la cella non la usa.
+    subject_stats: dict[str, Any] | None = None,
 ) -> Path:
     """
     Salva risultati in experiments/ (o sweep_dir) con timestamp.
@@ -6918,6 +7147,9 @@ def save_results(
             # 'epsilon' qui sopra (client-level) viene letto come budget della
             # cella, che e' falso: a sigma=1.0 il budget reale vale ~88, non 1.0.
             **_record_dp_fields(cfg, n_train_sessions, n_train_per_client),
+            # 2026-10-13: DP per soggetto. Se attiva, epsilon_subject_dp (non
+            # il campo 'epsilon') e' il budget della cella.
+            **_subject_dp_fields(cfg, subject_stats),
         },
         "summary": {
             # Yeom 2018 — loss-based MIA sul modello globale (baseline debole)
@@ -6931,6 +7163,11 @@ def save_results(
             # LiRA — Carlini 2022, server-side sul singolo update di ogni client
             # PRE-aggregazione FedAvg, POST-privatizzazione DP (fix 2026-07-21c) — attacco primario
             "mean_lira_auc_roc": float(np.mean(lira_auc_values)) if lira_auc_values else None,
+            # RMIA (2026-10-13), sugli stessi shadow di LiRA
+            "mean_rmia_auc_roc": (float(np.mean([r["rmia_auc_roc"] for r in mia_results.values()
+                                                 if r.get("rmia_auc_roc") is not None]))
+                                  if any(r.get("rmia_auc_roc") is not None for r in mia_results.values())
+                                  else None),
             "max_lira_auc_roc":  float(np.max(lira_auc_values))  if lira_auc_values else None,
             "min_lira_auc_roc":  float(np.min(lira_auc_values))  if lira_auc_values else None,
             # Privacy risk: usa l'attacco più forte (LiRA > Shadow > Yeom)
@@ -7714,6 +7951,18 @@ def main() -> None:
         sweep_dir=sweep_dir, extra_summary=_extra_summary,
         n_train_sessions=len(train_sessions),
         n_train_per_client={cid: len(s) for cid, s in cluster_sessions.items()},
+        subject_stats=(
+            _subject_stats(
+                cluster_sessions,
+                str(_subject_dp_config(cfg.get("ml", {}))["subject_key"]),
+                # stessa regola del trainer: feature_names se presente (anche
+                # vuoto), altrimenti le 6 storiche
+                list((cfg.get("ml", {}) or {}).get("feature_names")
+                     if (cfg.get("ml", {}) or {}).get("feature_names") is not None
+                     else AutoencoderTrainer.CONTINUOUS_FEATURES),
+            )
+            if _subject_dp_config(cfg.get("ml", {}))["enabled"] else None
+        ),
     )
 
     logger.info("=" * 60)

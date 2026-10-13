@@ -2009,7 +2009,13 @@ perché l'aggregato combina pochi contributi.
   authority, postcode, velocità) e popolazioni (`Population_data/`). Fonte: Strathclyde, DOI 10.15129/1f431af7-5caa-4840-a9ab-c1f3b521e033
   (confermata il 2026-10-12, `PROVENIENZA.txt` nella cartella).
 - Prerequisiti: verificare la licenza; preprocessing con le stesse feature di ACN dove esistono;
-  partizione in client da decidere e motivare (local authority o area di postcode).
+  partizione decisa il 2026-10-13: prima 32 client, uno per local authority, con
+  tutte le loro sessioni e nessun sottocampionamento (sottocampionare riprodurrebbe il limite di ACN); poi, se
+  serve, una replica a 3 client. Config `config/experiment_scotland_32client.yaml`: 4 feature informative (le 6
+  storiche di ACN meno `kwh_requested` e `minutes_available`, assenti in questo dataset), 10 round, 50 epoche;
+  escluse le 17383 sessioni senza local authority. Sessioni per client da 12322 a 260347, 3103044 in tutto.
+  Prima campagna sul canary da decidere dopo il pilota: con tutti i dati le 1000 epoche del protocollo canary
+  di ACN non sono sostenibili.
 - Stesso modello, stesso auditor, stesse regole di questo documento. Il punto operativo (C = 1, ε = 64) non si
   ricalibra: si prova la stessa configurazione e se ne misura il costo.
 - Pilota: 1 seed senza DP, per misurare il tempo di una run e verificare che il modello impari.
@@ -2031,6 +2037,167 @@ deployment".
 
 **Macchine.** Ogni blocco seed × condizione va su una sola macchina; i confronti fra condizioni si fanno solo
 dentro la stessa macchina.
+
+## Privacy di gruppo e DP per soggetto (2026-10-13)
+
+**Domanda.** La DP per record protegge la sessione, quella per client il sito. Chi ricarica spesso ha molte
+sessioni: quale garanzia ha la persona? Due strade: (1) la privacy di gruppo della DP per record gia' misurata;
+(2) un meccanismo che protegga direttamente il soggetto (la persona, o la colonnina dove manca l'utente).
+
+**Dati.** ACN: 72.6% delle sessioni con userID (Caltech 52.1%, JPL 93.5%, Office 1 34.8%), 1028 utenti,
+sessioni per utente mediana 14, p75 61, p90 142, max 529; 87 utenti in piu' siti. userID e' sempre una stringa
+con zeri iniziali. Scotland: nessun utente; 2878 colonnine, sessioni per colonnina mediana 590, p90 2770, max
+13462; ogni colonnina sta in una sola local authority; da 23 a 228 colonnine per local authority (mediana 81).
+
+**(1) Privacy di gruppo, `scripts/privacy_di_gruppo.py`.** Parametri delle run `rq1-recorddp-nm1/nm2`
+(B = 32, E = 50, T = 10, delta = 1e-5); sigma = 5 solo calcolo. Coppia dominante per un gruppo di k record con
+campionamento di Poisson (miscela binomiale di gaussiane contro gaussiana, entrambe le direzioni, tutti i k+1
+termini), ordini RDP >= 2 (prudente). Stessa approssimazione dei numeri per record: il training usa lo shuffle.
+Controlli: k = 1 coincide con dp-accounting, ordine 2 con la forma chiusa; i limiti generici (eps, delta) e RDP
+di Mironov sono piu' larghi (Caltech, sigma 2, k 14: 78 e 247 contro 46).
+
+| sigma | client | k=1 | k=5 | k=14 (mediana) | k=61 (p75) | k=142 (p90) |
+|---|---|---|---|---|---|---|
+| 2 | Caltech / JPL | 1.8 | 11.6 | 44-46 | ~4.6e7 | ~1.3e9 |
+| 2 | Office 1 | 9.9 | 96 | 730 | ~1e7 | ~8e7 |
+| 5 | Caltech / JPL | 0.6 | 3.6-3.7 | 12 | 101-107 | 503-537 |
+| 5 | Office 1 | 3.2 | 22 | 106 | 1.9e3 | 1.1e4 |
+
+Lettura: per la persona tipica la DP per record non da' una garanzia utile; per chi ricarica spesso (p75 in su)
+nemmeno a sigma = 5. Per le colonnine di Scotland (k mediano 590) ancora meno. Serve un meccanismo per soggetto.
+
+**(2) DP per soggetto, `src/ml/subject_dp.py`.** DP-SGD a livello di utente dentro ogni client: campionamento di
+Poisson dei soggetti, gradiente di ogni soggetto (loss media su al piu' `max_records_per_subject` sue sessioni)
+tagliato a C, rumore sigma*C, denominatore costante. Le copie di un canary sono un soggetto unico; le sessioni
+senza chiave sono soggetti singoli (protette solo come sessione). Soggetti in piu' client: taglio a C*w con
+w = loro sessioni nel client / totali, RDP sommate sui client (come ULDP-FL, Kato et al. 2024). L'accountant e'
+una garanzia (campionamento di Poisson vero, adiacenza add/remove del soggetto) per il meccanismo sui pesi; non
+copre n_samples e la loss media inviati al server senza rumore, le statistiche min-max, il numero di soggetti per
+client trattato come pubblico. JSON: `epsilon_subject_dp`, per client e per i soggetti su piu' client.
+Configurazione: `ml.subject_dp` (chiave, C, sigma, soggetti attesi per passo, record per soggetto); si lancia con
+`--no-dp`; norm group obbligatoria; non combinabile con record_dp ne' con i client sintetici. Revisione
+indipendente del codice il 2026-10-13: corretti il conteggio dei soggetti sulle sole righe valide (il trainer si
+ferma se trainer e accountant non coincidono), il denominatore con q = 1, il seme di campionamento per client, le
+chiavi numeriche scritte in modi diversi, il troncamento nel calcolo di gruppo. Test: `tests/test_subject_dp.py`
+(30); suite completa senza regressioni (falliscono solo i test che leggono i dataset, assenti nell'ambiente di
+prova).
+
+**Scotland, soggetto = colonnina** (`config/experiment_scotland_32client_subjectdp.yaml`, sigma 5, 8 colonnine
+attese per passo, E 50, T 10). Epsilon atteso nel client con 23 / 81 / 228 colonnine: 16 / 7.5 / 4.0; a sigma 10:
+6.8 / 3.3 / 1.8; con 5 epoche locali a sigma 5: 4.1 / 2.1 / 1.1. Proteggere la colonnina copre chi ricarica sempre
+alla stessa, non chi ne usa diverse. Prima run: seed 42, dopo il pilota senza DP (stessa macchina, il costo si
+legge contro quella run).
+
+```bash
+cd ~/Documents/ChargeShield-FL && nohup caffeinate -ims bash -c '
+d=_scotland32_subjectdp_s42
+python3 scripts/run_experiments.py --config config/experiment_scotland_32client_subjectdp.yaml --no-dp --seed 42 --n-shadow 2 --shadow-epochs-cap 20 --skip-attacks shadow --sweep-dir experiments/$d >> logs/scotland32_subjectdp.log 2>&1 && touch experiments/$d/.fatto
+' < /dev/null > logs/coda_scotland32_subjectdp.log 2>&1 & disown
+```
+
+**ACN, soggetto = utente** (`config/experiment_acn_subjectdp.yaml`, sigma 2 provvisorio): dopo Scotland.
+
+**Attacco di re-identificazione su ACN (2026-10-13, `scripts/reidentificazione_acn.py`).** Senza userID si
+possono ricondurre le sessioni alla stessa persona? Su ACN userID da' la verita'. Scenario a mondo chiuso: 580
+utenti con almeno 10 sessioni; per ognuno il primo 70% in ordine di tempo e' lo storico noto all'attaccante, il
+30% successivo (14092 sessioni) va attribuito. Vicini piu' prossimi (50, pesati per distanza). Risultati (caso:
+top-1 0.0017, top-5 0.0086; utente piu' frequente 0.011):
+
+| feature | top-1 | top-5 | rango mediano del vero utente |
+|---|---|---|---|
+| come Scotland (energia, potenza, ora, durata) | 0.209 | 0.411 | 10 su 580 |
+| feature del modello ACN (+ kWh richiesti, minuti disponibili) | 0.279 | 0.497 | 6 |
+| dati del client (+ colonnina, giorno) | 0.300 | 0.522 | 5 |
+
+Controllo: con le etichette dello storico mescolate top-1 0.0057 e top-5 0.024, al livello dell'utente piu'
+frequente. Il peso delle feature categoriche (1.0) e' scelto fra quattro valori sugli stessi dati: lieve
+ottimismo nell'ultima riga. Limiti: mondo chiuso (l'attaccante conosce gia' parte delle sessioni di ognuno),
+un solo metodo, nessuna ottimizzazione. Lettura: anche con le sole 4 feature di Scotland, una sessione su cinque
+si attribuisce alla persona giusta fra 580 (120 volte il caso). E' un attacco sui dati, non sul modello: la DP sui
+pesi non lo impedisce. Conta per due motivi: rende possibile una MIA a livello di persona dove l'id manca (si
+ricostruisce l'insieme delle sessioni di una persona e si chiede se e' nel training), e mostra che le sessioni di
+una persona sono riconoscibili come gruppo, quindi la garanzia rilevante e' quella per gruppo o per soggetto.
+
+**Re-identificazione ottimizzata (2026-10-13, `scripts/reidentificazione_ottimizzata.py`).** Stesso scenario
+(580 utenti, storico 70% / da attribuire 30%, 14092 sessioni). Tre attaccanti: vicini piu' prossimi; profilo
+bayesiano per utente (densita' a nucleo sulle sessioni dello storico, nuclei categorici per colonnina e giorno,
+prior sulla frequenza dell'utente); fusione dei due. Iperparametri scelti su una validazione temporale *dentro*
+lo storico (ultimo 30% dello storico), mai sulle sessioni da attribuire: niente ottimismo da selezione.
+
+| feature | vicini top-1 | profilo top-1 | fusione top-1 | migliore top-5 / top-10 | rango mediano |
+|---|---|---|---|---|---|
+| come Scotland | 0.215 | 0.199 | 0.213 | 0.410 / 0.509 | 10 su 580 |
+| feature del modello ACN | 0.317 | 0.315 | 0.322 | 0.497 / 0.579 | 6 |
+| dati del client | 0.330 | 0.346 | 0.347 | 0.528 / 0.608 | 4 |
+| dati del client + data | 0.298 | 0.373 | 0.366 | 0.548 / 0.625 | 4 |
+
+Controllo con etichette dello storico mescolate: top-1 fra 0.003 e 0.005 (caso 0.0017). Con le sole 4 feature
+di Scotland il guadagno sull'attacco semplice e' nullo: il limite e' l'informazione, non il metodo. Con i dati
+che un client ha davvero (colonnina, giorno, data) il profilo arriva a 0.37 top-1 e 0.63 top-10.
+
+**MIA a livello di persona (`scripts/mia_persona.py`).** Domanda: dato l'insieme delle sessioni di una persona,
+si capisce se la persona era nel training? Utenti ACN con almeno 10 sessioni divisi 50/50 in membri e non membri
+(per utente, non per sessione); il modello federato si allena su tutto tranne i non membri; un modello di
+riferimento si allena solo sullo sfondo (sessioni senza userID e utenti con meno di 10 sessioni) e serve a
+calibrare. Punteggio della persona = media della loss (grezza o meno quella del riferimento) sulle sue sessioni
+note. Attaccanti: oracolo (tutte le sessioni vere della persona), seme (3 o 10 sessioni note), seme + sessioni
+ritrovate con la re-identificazione (10, 20, 50 dal pool di tutte le sessioni), singola sessione. AUC con IC 95%
+bootstrap (1000). Meccanismi: senza DP, DP per client (locale, eps 64), DP per record sigma 2 e 5, DP per
+soggetto sigma 2 e 5. Il JSON riporta anche la precisione della re-identificazione e il costo (loss dei non
+membri). Prova breve (2 round x 2 epoche): tutte le AUC vicine a 0.5, precisione della re-identificazione
+9-20%. Run completa senza DP, seed 42, in corso nel cloud; le altre sono nel pacchetto offline.
+
+**RMIA (Zarifzadeh et al., ICML 2024), in `scripts/run_experiments.py`.** Gira gratis dove gira LiRA: usa gli
+stessi modelli shadow. Adattamento all'autoencoder: verosimiglianza exp(-loss/tau), con tau = mediana della loss
+di ciascun modello (target e ogni shadow normalizzati con la propria scala); rapporto fra la verosimiglianza sul
+target e la media sui riferimenti; punteggio = frazione della popolazione z (non membri dello stesso client e
+round) battuta dal record, gamma = 1. Versione online (tutti i riferimenti) e offline (solo OUT, a = 0.3).
+Campi per round `rmia_auc_roc`, `rmia_offline_auc_roc`, `rmia_tpr_at_fpr_*`, `canary_rmia_auc_roc`; composto
+sui round (somma dei log-rapporti) `composed_rmia_auc_roc`; nel summary `mean_rmia_auc_roc`. Senza la
+normalizzazione per modello la versione online si invertiva (AUC 0.39) quando gli shadow fanno meno epoche del
+target (`--shadow-epochs-cap 20`): il rapporto diventava una differenza di scala. Con la normalizzazione, su dati
+sintetici con segnale noto: online 0.81, offline 0.80. Test: `tests/test_rmia.py` (7). Nella letteratura RMIA
+e' piu' forte di LiRA soprattutto con pochi modelli di riferimento (il nostro caso: 2 shadow); su ACN e Scotland
+lo dira' il pacchetto offline, che rifa' le celle principali con entrambi.
+
+**RQ3 riformulata (2026-10-13).** Domanda: FedAvg o FedProx, e soprattutto quanto del costo della DP per client
+in una federazione piccola e' dovuto al taglio, e se il termine prossimale lo recupera. Vicini in letteratura:
+Zhang et al., ICML 2022 (bias del taglio e distribuzione delle norme), Cheng et al., CVPR 2022 (BLUR,
+regolarizzare la norma locale prima del taglio). Nostro: l'inversione FedAvg/FedProx sugli stessi seed, il test
+causale con solo taglio e solo rumore, la curva non monotona in mu, il vantaggio come velocita' a budget di round
+fissato, Scotland come secondo dataset.
+
+Metriche (da fissare prima di leggere Scotland):
+- L = loss sull'holdout del modello rilasciato (`-non_member_score_mean` di Yeom), all'ultimo round o per round.
+- Costo per algoritmo, contro il *proprio* senza DP, stesso seed: dL_A = L_A(DP) - L_A(noDP); rapporto
+  rho_A = L_A(DP) / L_A(noDP) (la soglia "3x" del claim 2 e' rho). Poiche' le loss di FedAvg e FedProx senza DP
+  sono di scala diversa, si riportano anche log rho.
+- Scomposizione: taglio = L(solo taglio) - L(noDP); rumore = L(solo rumore) - L(noDP); interazione = dL - taglio
+  - rumore.
+- Recupero R = (dL_FedAvg - dL_FedProx) / dL_FedAvg: rapporto delle medie sui seed (non media dei rapporti), IC
+  bootstrap appaiato sui seed; si riporta solo se l'IC di dL_FedAvg esclude 0 con margine (dL_FedAvg ben sopra la
+  variabilita' fra seed del senza DP), altrimenti si riporta la sola differenza dL_FedAvg - dL_FedProx con IC.
+  Accanto, sempre il confronto diretto L_FedProx(DP) contro L_FedAvg(DP): R e' relativo a baseline diverse.
+- Tre confronti: a parita' di round (L all'ultimo round); a parita' di qualita' (round per raggiungere una loss
+  bersaglio fissata in anticipo, censurati se non raggiunta, da `loss_per_round.csv`); a parita' di budget DP
+  (stessi sigma, C, T e partecipazione, quindi stesso eps; l'eps per client qui calibra il rumore di un round).
+
+**Nuove configurazioni Scotland (32 client):** `experiment_scotland32_mu0`, `_eps64`, `_mu0_eps64`,
+`_mu0.001_eps64`, `_mu0.1_eps64` (RQ3 e curva in mu), `_iid` (claim 4), `_canary` e `_canary_swap` (controllo
+positivo: sito Na h-Eileanan an Iar, 20+20 modelli, 220 copie, 5 feature con `start_time_epoch`).
+
+**Pacchetto per il PC offline (2026-10-13), `~/Downloads/ChargeShield_offline/`, 404 MB.** Per un Mac Apple
+Silicon con macOS 14+, senza rete: codice e dati (`codice/`), Python 3.12.14 standalone e 34 ruote
+(`installazione/`, torch 2.14.1), un esecutore di coda che riempie core e memoria in ordine di priorita' e
+riprende dopo un'interruzione. Coda: 118 run, 464 ore-run; durata stimata 125-135 ore con 16-32 core e 64 GB
+(con 32 GB circa 250, perche' una run Scotland tiene circa 12 GB). Priorita' 1: Scotland RQ3 (8 celle, seed 42 e
+123), ACN celle principali e canary A/B con RMIA (5 seed), re-identificazione ottimizzata, MIA per persona
+senza DP e con DP per client. Priorita' 2: canary e DP per soggetto su Scotland, DP per soggetto su ACN, MIA
+per persona con DP per soggetto e per record. Priorita' 3: Scotland seed 456, IID. Priorita' 4: mu 0.001 e 0.1
+sotto DP su Scotland, privacy di gruppo. Istruzioni in `LEGGIMI.md`; si riporta `risultati_da_riportare.tar.gz`
+(JSON di ogni run e riepiloghi `riepilogo_run.csv`, `loss_per_round.csv`, `mia_persona.csv`).
+Le run ACN del pacchetto rifanno celle gia' fatte sulle altre macchine: servono a avere RMIA e LiRA sulla
+stessa macchina e con lo stesso codice; non sostituiscono quelle esistenti.
 
 ## Rinviato o escluso
 
