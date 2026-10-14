@@ -33,6 +33,7 @@
 | `experiment_sc3_groupnorm.yaml` | come `experiment_sc3.yaml` con `ml.norm: group` | RQ1, riferimento della DP per record e per soggetto, `--no-dp` |
 | `experiment_sc3_recorddp.yaml` | `ml.norm: group`, `ml.record_dp` C 1, sigma 1 | RQ1, DP per record sulla Scozia, `--no-dp` |
 | `experiment_sc3_subjectdp.yaml` | `ml.norm: group`, `ml.subject_dp` (colonnina) C 1, sigma 5 | RQ1, DP per soggetto sulla Scozia, `--no-dp` |
+| `experiment_cap32_16.yaml`, `experiment_cap64_32.yaml`, `experiment_cap128_64.yaml` | solo `ml.hidden_dims` e `ml.latent_dim` (1 870, 6 294, 22 822 parametri contro 618) | RQ1, curva di sensibilita' in capacita' (2026-10-14), `--no-dp`, LiRA e RMIA |
 | `experiment_acn4f.yaml`, `experiment_acn4f_mu0.yaml` | solo `ml.input_dim: 4` e `ml.feature_names` (le quattro feature comuni con la Scozia) rispetto a `experiment.yaml` e `experiment_rq3_mu0.yaml` | RQ3, controllo ACN a quattro feature (2026-10-14), con `--no-dp`, sola utilita' |
 | `experiment_acn4f_eps64.yaml`, `experiment_acn4f_mu0_eps64.yaml` | come sopra rispetto a `experiment_rq1_eps64.yaml` e `experiment_rq3_mu0_eps64.yaml` | RQ3, controllo ACN a quattro feature: DP completa e, con `--dp-ablation`, solo taglio e solo rumore; sola utilita' |
 | `experiment_scotland32_recorddp.yaml` | da `experiment_scotland_32client.yaml`: `ml.norm: group` e `ml.record_dp` (C = 1, sigma = 5) | RQ1, Scozia completa (2026-10-14), con `--no-dp`; circa 4-6 giorni a run; rinviato alla tesi (Scozia a 32 council) |

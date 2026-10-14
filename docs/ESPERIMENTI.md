@@ -2086,6 +2086,32 @@ e tabella sono anche in testa ai config `experiment_sc3*.yaml`.
 - Prima di tutto una run di prova cronometrata (`sc3_prova_s42`: seed 42, senza DP, FedProx): le altre run
   della Scozia partono solo dopo.
 
+**LiRA e RMIA anche sulla Scozia** (decisione della dottoranda, 14 ottobre, da riferire al supervisore: il
+documento del 12 ottobre li escludeva). Nelle quattro celle principali (senza DP e DP completa, FedAvg e
+FedProx, 5 seed) gli attacchi girano come nelle celle RQ3 di ACN (`--n-shadow 2 --shadow-epochs-cap 20`,
+Shadow saltato); righe `sc3a_*` nella coda, circa 7 ore-run in più. Ablazioni, curva in μ e celle con DP per
+record e per soggetto restano di sola utilità.
+
+**Curva di sensibilità** (decisa il 14 ottobre). Domanda: il nullo del regime naturale dipende dalla capacità
+del modello? Due assi.
+- Capacità (nuovo, Mac di Domenico, stessa macchina per tutta la curva): regime naturale di ACN, senza DP,
+  FedProx μ = 0.01, LiRA e RMIA, 5 seed; architettura del regime naturale (16, 8), latente 4, 618 parametri, e
+  `experiment_cap32_16` (1 870 parametri, 3 volte), `experiment_cap64_32` (6 294, 10 volte),
+  `experiment_cap128_64` (22 822, 37 volte). 20 run, circa 23 ore-run.
+- Intensità del segnale: il controllo positivo per persona nel regime naturale (architettura del regime
+  naturale, 1, 10 e 30 copie, due superfici), già in `coda_mac.csv` (righe `cp_naturale_*`).
+
+Precedente da tenere presente: l'escalation di agosto (Sprint 10jj-10nn: Office 1, 3 round, 1000 epoche, un
+seed) ha dato LiRA composto fra 0.48 e 0.54 anche con capacità 3.3 volte, con una feature quasi univoca e con
+un altro sito. Correzione: il modello del regime naturale ha 618 parametri; i circa 1 800 citati nel documento
+del 12 ottobre sono quelli del modello del canary ((32, 16), latente 8).
+
+Previsione per la curva di capacità, proposta dall'assistente sulla base dell'escalation di agosto, da
+confermare dalla dottoranda prima del lancio: LiRA composto e RMIA fra 0.48 e 0.54 a ogni capacità; il divario
+di loss fra membri e non membri cresce con la capacità. Lettura: se la previsione regge, il nullo non dipende
+dalla sola capacità ma da quanto le sessioni sono distinguibili fra loro; se l'AUC sale con la capacità, il
+nullo dipende dalla capacità. Previsione per LiRA e RMIA sulla Scozia: al caso, come su ACN.
+
 **Controllo ACN a quattro feature** (stessa coda, stessa macchina della Scozia). Le otto celle di RQ3 a 5
 seed, 40 run, sola utilità come la Scozia. Config `experiment_acn4f*.yaml`: cambiano solo `ml.input_dim` e
 `ml.feature_names` rispetto alle celle RQ3 di ACN; con quattro feature il modello prende la capacità

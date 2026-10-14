@@ -1,0 +1,140 @@
+# RQ1, curva di sensibilita' in capacita' (decisa il 2026-10-14): il nullo naturale dipende dalla
+# capacita' del modello? Fase: congelamento DSN 2027. Regime naturale, senza DP con --no-dp, FedProx mu 0.01.
+# Cosa cambia rispetto a config/experiment.yaml: solo ml.hidden_dims (128, 64) e ml.latent_dim 32:
+# 22822 parametri, circa 37 volte i 618 dell'architettura del regime naturale ((16, 8), latente 4).
+
+# ChargeShield-FL — Experiment Configuration
+# Usato da: scripts/run_experiments.py
+
+experiment:
+  name: chargeshield_fedmia_baseline
+  # fl_rounds qui sotto è SOLO il default per chi invoca run_experiments.py
+  # direttamente senza --rounds. Fix 2026-07-24 (trovato verificando i
+  # parametri prima del consolidamento multi-seed): ogni target Makefile
+  # reale (experiment-nodp/-dp/-central-dp/-local-dp e le loro varianti
+  # -sweep) passa sempre --rounds 10 esplicitamente, che ha precedenza su
+  # questo valore — quindi TUTTI i risultati reali prodotti finora (inclusi
+  # i due Central DP ε=1.0/ε=0.1 già pubblicati in
+  # docs/PrivacyExposureScore_v1.md) usano 10 round, non 100. Il commento
+  # "esperimenti finali paper" che etichettava 100 qui era fuorviante: 100
+  # non è mai stato usato per nessun risultato reale di questo progetto, e
+  # cambiarlo ora per il consolidamento multi-seed renderebbe i nuovi run
+  # incomparabili con gli ancoraggi single-seed che devono confermare.
+  # 10 resta il protocollo stabilito finché non si decide altrimenti.
+  fl_rounds: 10
+  seed: 42        # riproducibilità: usato da random.shuffle prima della split FL
+  # Differential Privacy
+  epsilon: 1.0
+  delta: 1.0e-5
+  max_grad_norm: 1.0
+  # proximal_mu: rimosso — il codice legge cfg["ml"]["proximal_mu"], non cfg["experiment"]["proximal_mu"]
+
+# sites (2026-07-22): sostituisce la precedente sezione "datasets" (jpl_2019/
+# jpl_2020 — che in realtà, scoperto oggi, erano dati Caltech mal etichettati
+# "jpl", vedi README/CaseStudies.md per il dettaglio). Ogni sito reale combina
+# TUTTI gli anni disponibili (2018-2021, tranne Office 1 dove il 2018 non
+# esiste su ev.caltech.edu) in un unico pool — stessa logica già usata prima
+# per jpl_2019+jpl_2020, ora applicata per sito invece che globalmente.
+# I 3 siti sono gli UNICI siti reali disponibili in ACN-Data (verificato su
+# https://ev.caltech.edu/dataset, sezione "Sites": Caltech 54 EVSE, JPL 50
+# EVSE, Office 1 8 EVSE — nessun 4°/5° sito esiste in questo dataset).
+# Ogni sessione porta il proprio site_id reale (src/adapters/acn_dataset.py) —
+# scripts/run_experiments.py::group_indices_by_site() raggruppa per quello,
+# non serve che le liste qui sotto siano in un ordine particolare.
+sites:
+  caltech:
+    - datasets/acn/caltech/acndata_sessions_2018.json
+    - datasets/acn/caltech/acndata_sessions_2019.json
+    - datasets/acn/caltech/acndata_sessions_2020.json
+    - datasets/acn/caltech/acndata_sessions_2021.json
+  jpl:
+    - datasets/acn/jpl/acndata_sessions_2018.json
+    - datasets/acn/jpl/acndata_sessions_2019.json
+    - datasets/acn/jpl/acndata_sessions_2020.json
+    - datasets/acn/jpl/acndata_sessions_2021.json
+  office1:
+    - datasets/acn/office1/acndata_sessions_2019.json
+    - datasets/acn/office1/acndata_sessions_2020.json
+    - datasets/acn/office1/acndata_sessions_2021.json
+    # Nessun 2018: non disponibile per Office 1 su ev.caltech.edu.
+
+# fedmia: parametri legacy — sezione mantenuta per compatibilità con codice meno recente.
+# Il pipeline sperimentale (run_experiments.py) esegue tre attacchi separati:
+#   Yeom 2018      → run_fedmia()          (loss-based, globale)
+#   Shadow MIA     → run_fedmia_shadow()   (calibrated, globale)
+#   LiRA ★ PRIMARY → run_lira()            (server-side, raw_updates pre-FedProx)
+# I parametri shadow/lira sono letti da cfg["ml"]["epochs"] e cfg["lira"]["n_shadow"].
+# fedmia:
+#   shadow_epochs: 5     # non usato: shadow_epochs calcolato automaticamente
+#   attack_threshold: 0.5
+#   n_shadow_models: 4   # non usato: usare lira.n_shadow
+
+ml:
+  input_dim: 6
+  hidden_dims: [128, 64]
+  latent_dim: 32
+  lr: 0.001
+  # epochs: aumentato da 3 → 50 (Sprint 9, 2026-07-16).
+  # Motivazione: no-DP baseline (5 round × 3 epochs = 15 epoche totali) ha prodotto
+  # AUC=0.497 senza DP → Scenario B: il modello non memorizza con training insufficiente.
+  # Con 50 epoche/round il modello overfita sui dati locali (~2615 sessioni per cluster),
+  # creando il segnale di membership necessario per dimostrare che DP lo sopprime.
+  # Il claim DSN 2027 "DP riduce AUC da X a 0.5" richiede prima X > 0.5 (Scenario A).
+  # Shadow MIA:   shadow_epochs = min(50 × fl_rounds, 500)        cap=500, formula in run_fedmia_shadow()
+  # LiRA:         shadow_epochs = min(50 × max(rounds//4, 5), 300) cap=300, formula in run_lira()
+  # Smoke test:   shadow_epochs overrideabile con --shadow-epochs-cap 20 (solo per test rapido)
+  epochs: 50
+  batch_size: 32
+  proximal_mu: 0.01
+
+output:
+  experiments_dir: experiments
+
+# ── Sprint 9: LiRA Attack ─────────────────────────────────────────────────────
+# LiRA (Carlini et al., IEEE S&P 2022) — attacco più forte del paper.
+# Threat model: aggregatore semi-onesto intercetta raw_updates prima di FedProx.
+# n_shadow: numero shadow models locali (no FL, no DP) per calibrare IN/OUT distributions.
+#   8  = fast demo (~10-15 min CPU, sufficiente per validare il codice)
+#   16 = buona qualità (consigliato per il paper submission)
+#   32 = paper quality (slow ma risultati statisticamente solidi)
+# shadow_epochs vengono calcolati automaticamente: min(epochs * rounds/4, 300)
+lira:
+  # 2026-07-24: allineato al default del Makefile (N_SHADOW 8→16, 2026-07-23,
+  # dopo l'instabilità di calibrazione vista al round 8 con soli 8 shadow/
+  # cluster). Questo valore si applica solo se run_experiments.py viene
+  # invocato direttamente senza --n-shadow (i target Makefile lo passano
+  # sempre esplicitamente, quindi non erano affetti).
+  n_shadow: 16
+
+# ── Sprint 8: Byzantine Attack Simulation ─────────────────────────────────────
+# Inietta un gradient scaling attack su un nodo per validare l'IDS.
+# L'attaccante moltiplica i propri pesi per scale_factor prima dell'invio
+# all'aggregatore. Con scale_factor=10, il nodo è ~10× più "lontano"
+# geometricamente dagli altri → Krum score >1.5 → alert reale.
+#
+# IMPORTANTE (2026-07-22): quando enabled=true, run_experiments.py aggiunge
+# ESCLUSIVAMENTE a questo run 2 client FITTIZI (synthetic_1/synthetic_2, dati
+# reali ri-affettati dal pool combinato — vedi inject_synthetic_client_indices()
+# in scripts/run_experiments.py) oltre ai 3 siti reali (caltech/jpl/office1),
+# per un totale di 5 client — necessario perché Krum garantisce di rilevare
+# f=1 nodo Byzantine solo con n≥2f+3=5 nodi, e i soli 3 siti reali non
+# bastano (nessun 4°/5° sito reale esiste in ACN-Data). Con enabled=true,
+# FedMIA/Shadow/LiRA vengono SALTATI DEL TUTTO (non solo "da non fidarsi") —
+# questo run serve SOLO a validare Krum/ByzantineDetector, non produce numeri di
+# privacy validi per il paper. Per gli esperimenti di privacy, lasciare
+# enabled=false: SOLO i 3 client reali vengono usati, sia per il training
+# FL sia per FedMIA/Shadow/LiRA.
+#
+# attack_type:
+#   none            → baseline (nessun attacco, default)
+#   gradient_scaling → moltiplica pesi attaccante × scale_factor
+#
+# byzantine_node: nome del cluster attaccante — synthetic_1 o synthetic_2
+#                 (MAI un sito reale, per non implicare che un sito reale
+#                 specifico sia "malevolo" nella narrazione del paper)
+# scale_factor:   intensità attacco (10 = forte, 3 = moderato, 50 = devastante)
+byzantine_attack:
+  enabled: false           # true = attiva attacco + 2 client sintetici; false = solo 3 siti reali
+  attack_type: gradient_scaling
+  byzantine_node: synthetic_1  # cluster attaccante fittizio
+  scale_factor: 10          # intensità: 10× → rilevabile da Krum; 3× → borderline
