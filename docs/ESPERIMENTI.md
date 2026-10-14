@@ -2079,7 +2079,7 @@ Configurazione: `ml.subject_dp` (chiave, C, sigma, soggetti attesi per passo, re
 indipendente del codice il 2026-10-13: corretti il conteggio dei soggetti sulle sole righe valide (il trainer si
 ferma se trainer e accountant non coincidono), il denominatore con q = 1, il seme di campionamento per client, le
 chiavi numeriche scritte in modi diversi, il troncamento nel calcolo di gruppo. Test: `tests/test_subject_dp.py`
-(30); suite completa senza regressioni (falliscono solo i test che leggono i dataset, assenti nell'ambiente di
+(29); suite completa senza regressioni (falliscono solo i test che leggono i dataset, assenti nell'ambiente di
 prova).
 
 **Scotland, soggetto = colonnina** (`config/experiment_scotland_32client_subjectdp.yaml`, sigma 5, 8 colonnine
@@ -2189,8 +2189,8 @@ positivo: sito Na h-Eileanan an Iar, 20+20 modelli, 220 copie, 5 feature con `st
 **Pacchetto per il PC offline (2026-10-13), `~/Downloads/ChargeShield_offline/`, 404 MB.** Per un Mac Apple
 Silicon con macOS 14+, senza rete: codice e dati (`codice/`), Python 3.12.14 standalone e 34 ruote
 (`installazione/`, torch 2.14.1), un esecutore di coda che riempie core e memoria in ordine di priorita' e
-riprende dopo un'interruzione. Coda: 118 run, 464 ore-run; durata stimata 125-135 ore con 16-32 core e 64 GB
-(con 32 GB circa 250, perche' una run Scotland tiene circa 12 GB). Priorita' 1: Scotland RQ3 (8 celle, seed 42 e
+riprende dopo un'interruzione. Coda: 172 run, 572 ore-run; durata stimata 145-155 ore con 16-32 core e 64 GB
+(con 32 GB circa 290, perche' una run Scotland tiene circa 12 GB); priorita' 1 e 2 in 80-95 ore. Priorita' 1: Scotland RQ3 (8 celle, seed 42 e
 123), ACN celle principali e canary A/B con RMIA (5 seed), re-identificazione ottimizzata, MIA per persona
 senza DP e con DP per client. Priorita' 2: canary e DP per soggetto su Scotland, DP per soggetto su ACN, MIA
 per persona con DP per soggetto e per record. Priorita' 3: Scotland seed 456, IID. Priorita' 4: mu 0.001 e 0.1
@@ -2198,6 +2198,78 @@ sotto DP su Scotland, privacy di gruppo. Istruzioni in `LEGGIMI.md`; si riporta 
 (JSON di ogni run e riepiloghi `riepilogo_run.csv`, `loss_per_round.csv`, `mia_persona.csv`).
 Le run ACN del pacchetto rifanno celle gia' fatte sulle altre macchine: servono a avere RMIA e LiRA sulla
 stessa macchina e con lo stesso codice; non sostituiscono quelle esistenti.
+
+## Persona: esito, controllo positivo e claim 4 (2026-10-13)
+
+**Il piano resta il nostro** (decisione della dottoranda, 13 ottobre), anche dove il report di Domenico del 12
+ottobre dice altro: Scotland a 32 client con tutte le sessioni (poi al massimo 3 client), non 3 client con i mesi
+sottocampionati; su Scotland si fanno anche LiRA, canary e partizione IID; il claim 4 resta "l'eterogeneita' della
+partizione cambia il leakage rilevabile" e va verificato, non dato per vero.
+
+**Esperimento per persona (pacchetto SusyTemp, commit 6acc19f + PATCH_persona.diff).** Split per utente
+(1028 utenti, ~800 interi dentro, ~200 interi fuori), 10 x 50, senza DP, 5 seed, gia' eseguito (macchina da
+registrare in PROVENIENZA). Analisi con `scripts/analisi_persona.py` del pacchetto: AUC per utente (media delle
+sue sessioni) 0.502 / 0.498 / 0.490 / 0.486 per almeno 1 / 5 / 20 / 50 sessioni, 0 seed su 5 con IC sopra 0.5 o
+z > 3, anche per sito (JPL, Caltech; Office 1 ha 4 utenti fuori). Previsione P1 (nullo) confermata, P4 anche: gli
+utenti mai visti non sono ricostruiti peggio (in 2 seed meglio). Variante calibrata (ogni utente confrontato con i
+modelli degli altri 4 seed, in cui spesso era fuori; solo riferimenti "fuori"): 0.511 per k >= 20, 0.521 per
+k >= 50, nessun seed significativo. Per seed si esclude un segnale grande (AUC oltre circa 0.57), non uno piccolo.
+Nota: con lo split per utente l'AUC per sessione oscilla 0.46-0.53 fra i seed; non e' segnale, le sessioni di una
+persona sono correlate e l'IC va fatto per utente.
+
+**Controllo positivo per persona (`scripts/canary_persona.py`, test `tests/test_canary_persona.py`).** Senza, il
+nullo per persona non si puo' leggere. Pool: 40 utenti reali di JPL con almeno 30 sessioni (249 idonei), due
+gruppi da 20 estratti col seed. Di ogni utente 20 sessioni "di training" e 10 "fresche", mai nel training. Braccio
+A: dentro le sessioni di training di G1, ripetute COPIE volte; G2 fuori del tutto. Braccio B: ruoli scambiati.
+Stesso seed e stessa normalizzazione nei due bracci. Due tipi di persona: reali (`--spostamento 0`) e costruite
+per essere memorizzate (`--spostamento 0.5`: ogni sessione della persona e' avvicinata a meta' strada verso un
+centro proprio dell'utente scelto a caso nel cubo [0,1]^d; resta in [0,1], dove arriva la sigmoide del decoder).
+Due superfici: il modello globale e l'update del client JPL. Metriche: AUC appaiata (per ogni utente la
+differenza di loss fra il braccio in cui e' fuori e quello in cui e' dentro: toglie la difficolta' propria della
+persona; IC bootstrap, p di permutazione dei gruppi) e somma A+B delle AUC grezze (caso 1.0), su sessioni di
+training e fresche, per round.
+
+Prove brevi nel cloud (seed 42, config del canary multisito, 1 round x 100 epoche invece di 3 x 1000, 30 copie):
+
+| persone | superficie | appaiata training | appaiata fresche |
+|---|---|---|---|
+| costruite (0.5) | globale | 0.54 (p 0.68) | 0.55 (p 0.64) |
+| costruite (0.5) | update del client | 1.00 (p 0.001) | 1.00 (p 0.001) |
+| reali | globale | 0.47 (p 0.74) | 0.48 (p 0.83) |
+| reali | update del client | 0.74 (p 0.01) | 0.61 (p 0.25) |
+
+Con l'architettura del regime naturale (6 feature, latente 4) e 30 copie, 100-300 epoche, niente su nessuna
+superficie misurata allora (solo globale). Lettura provvisoria: la media FedAvg con i client che non hanno visto
+la persona la cancella dal modello globale; l'update del client la porta. Lo strumento vede la persona sulla
+superficie client, la persona costruita anche sulle sessioni mai viste. Il nullo per persona di SusyTemp e della
+MIA per persona e' misurato solo sul modello globale: la superficie client per persone reali senza
+amplificazione va misurata (canary persona naturale, 1 copia, priorita' 1 nel pacchetto).
+
+Previsioni per le run complete, scritte prima:
+- PC1 (validita'): indotto 3 x 1000, 30 copie, persone costruite, update del client: appaiata > 0.9 su training e
+  fresche in almeno 4 seed su 5. Se cade, lo strumento per persona non e' validato.
+- PC2: stesse run, persone reali, update del client: appaiata training > 0.7 con p < 0.05 in almeno 4 seed; sulle
+  fresche e' la domanda aperta (persona contro sessione).
+- PC3: modello globale: appaiata entro 0.5 +- 0.1 in tutte le celle (la media FedAvg nasconde la persona).
+- PC4: naturale, 1 copia, persone reali: appaiata entro 0.5 +- 0.1 su entrambe le superfici (coerente con
+  SusyTemp). Se l'update del client supera 0.6 con p < 0.05 in 2 seed su 3, la persona e' esposta sull'update
+  anche senza amplificazione: e' un risultato, non un controllo.
+Pilota su Windows: seed 42, indotto, 30 copie, persone reali e costruite (4 run). Nel pacchetto offline gli altri
+seed, la curva in copie e le persone reali senza amplificazione.
+I bracci della MIA per persona con DP (soggetto, record) passano a priorita' 3-4: senza DP sul globale non c'e'
+segnale; contano sulla superficie client, se PC2/PC4 mostrano un segnale da togliere.
+
+**Claim 4, dove il leakage si vede.** Nel regime naturale gli attacchi sono al caso con entrambe le partizioni
+(E-D), quindi "la partizione cambia il leakage rilevabile" si verifica sul canary. Config
+`experiment_canary_multisite_iid.yaml` / `_swap_iid.yaml` (ACN) e `experiment_scotland32_canary_iid.yaml` /
+`_swap_iid.yaml`: identici ai canary per sito tranne `partition.strategy: iid`; i canary sono iniettati nel sito
+prima della partizione, poi rimescolati fra i client con le stesse numerosita' (prova del 13 ottobre: funziona,
+la metrica LiRA canary per client resta con pochi non membri, la metrica e' la loss grezza del modello globale).
+Su Windows i seed 42, 123, 1234, accanto ai canary per sito gia' fatti li' (RXnodp); nel pacchetto 456 e 789.
+Metrica: somma A+B delle AUC grezze del canary al round 1, IID contro per sito, stesso seed, stessa macchina.
+Previsione scritta prima: con IID le copie stanno nei client grandi e pesano di piu' nell'aggregato, quindi la
+somma A+B e' piu' alta che per sito. Il claim regge se la differenza appaiata sui 5 seed ha IC che esclude 0;
+altrimenti si scrive "la partizione non cambia il leakage rilevabile, ne' naturale ne' indotto".
 
 ## Rinviato o escluso
 
