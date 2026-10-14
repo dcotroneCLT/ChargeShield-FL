@@ -1,0 +1,96 @@
+# ChargeShield-FL — Scotland 32 client, DP a livello di RECORD (DP-SGD, clipping per esempio)
+# RQ1 (costo e protezione della DP per record) sul secondo dataset. Fase: congelamento DSN 2027, campagna Scozia completa (decisione del 2026-10-14).
+# Creato il 2026-10-14 da config/experiment_scotland_32client.yaml (32 local authority,
+# tutte le sessioni, 4 feature, 10 round, 50 epoche, FedProx mu 0.01). Solo le differenze:
+# norm group (obbligatoria con record_dp) e record_dp con C = 1, sigma = 5 (lo stesso
+# sigma della DP per soggetto su Scotland, per confrontare i meccanismi a parita' di sigma).
+# Si lancia con --no-dp: la DP per client resta spenta, un meccanismo per cella.
+# Costo: microbatch da 1, circa 12 volte un passo normale (misurato il 2026-10-14):
+# una run richiede 4-6 giorni. Epsilon nel JSON: epsilon_record_dp.
+experiment:
+  name: chargeshield_scotland32_recorddp
+  fl_rounds: 10
+  seed: 42
+  epsilon: 1.0
+  delta: 1.0e-05
+  max_grad_norm: 1.0
+dataset_adapter: chargeplace_scotland
+chargeplace_scotland:
+  metadata_dir: datasets/alt/chargeplace_scotland/CPID_information
+  clients:
+  - Glasgow City
+  - East Ayrshire
+  - City of Edinburgh
+  - North Lanarkshire
+  - Dundee City
+  - Stirling
+  - South Lanarkshire
+  - Renfrewshire
+  - Fife
+  - Perth and Kinross
+  - South Ayrshire
+  - Highland
+  - West Lothian
+  - East Lothian
+  - Aberdeenshire
+  - Aberdeen City
+  - Falkirk
+  - Angus
+  - Scottish Borders
+  - East Dunbartonshire
+  - East Renfrewshire
+  - North Ayrshire
+  - Dumfries and Galloway
+  - Midlothian
+  - Argyll and Bute
+  - Clackmannanshire
+  - West Dunbartonshire
+  - Moray
+  - Inverclyde
+  - Orkney Islands
+  - Shetland Islands
+  - Na h-Eileanan an Iar
+  session_files:
+  - datasets/alt/chargeplace_scotland/Sessions_from_CPS/October22.xlsx
+  - datasets/alt/chargeplace_scotland/Sessions_from_CPS/November22.xlsx
+  - datasets/alt/chargeplace_scotland/Sessions_from_CPS/DEC-22.xlsx
+  - datasets/alt/chargeplace_scotland/Sessions_from_CPS/JAN-23.xlsx
+  - datasets/alt/chargeplace_scotland/Sessions_from_CPS/FEB-2023.xlsx
+  - datasets/alt/chargeplace_scotland/Sessions_from_CPS/March23.xlsx
+  - datasets/alt/chargeplace_scotland/Sessions_from_CPS/April23.xlsx
+  - datasets/alt/chargeplace_scotland/Sessions_from_CPS/MAY23.xlsx
+  - datasets/alt/chargeplace_scotland/Sessions_from_CPS/JUNE-23.xlsx
+  - datasets/alt/chargeplace_scotland/Sessions_from_CPS/JULY-23.xlsx
+  - datasets/alt/chargeplace_scotland/Sessions_from_CPS/AUG-23.xlsx
+  - datasets/alt/chargeplace_scotland/Sessions_from_CPS/SEP-23.xlsx
+  - datasets/alt/chargeplace_scotland/Sessions_from_CPS/OCT-23.xlsx
+  - datasets/alt/chargeplace_scotland/Sessions_from_CPS/NOV-23.xlsx
+  - datasets/alt/chargeplace_scotland/Sessions_from_CPS/DEC-23.xlsx
+  - datasets/alt/chargeplace_scotland/Sessions_from_CPS/JAN-24.xlsx
+  - datasets/alt/chargeplace_scotland/Sessions_from_CPS/FEB-24.xlsx
+  - datasets/alt/chargeplace_scotland/Sessions_from_CPS/MARCH-24.xlsx
+ml:
+  input_dim: 4
+  lr: 0.001
+  epochs: 50
+  batch_size: 32
+  proximal_mu: 0.01
+  feature_names:
+  - total_energy_kwh
+  - max_power_kw
+  - hour_of_day
+  - duration_hours
+  norm: group
+  record_dp:
+    enabled: true
+    max_grad_norm: 1.0
+    noise_multiplier: 5.0
+output:
+  experiments_dir: experiments
+lira:
+  n_shadow: 16
+byzantine_attack:
+  enabled: false
+  attack_type: gradient_scaling
+  byzantine_node: synthetic_1
+  scale_factor: 10

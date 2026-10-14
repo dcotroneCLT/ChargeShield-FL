@@ -1,0 +1,57 @@
+# ChargeShield-FL — Scozia ridotta, 3 council (decisione del 2026-10-14)
+# RQ1, riferimento della DP per record e per soggetto. Fase: congelamento DSN 2027, replica su un secondo dataset.
+# Cella: FedProx mu 0.01, senza DP con --no-dp, norm group.
+# Cosa cambia rispetto a config/experiment.yaml: dataset ChargePlace Scotland (3 council,
+# settembre-novembre 2023), quattro feature (input_dim 4); 10 round, 50 epoche come ACN.
+#
+# Scelta (regola del 12 ottobre: due council grandi di taglia simile e uno piccolo intorno a
+# un ventesimo, stessi mesi consecutivi nel mezzo del periodo, niente primi due mesi ne'
+# dicembre). Conteggi da scripts/conteggi_scozia.py (risultati/scozia_conteggi/), settembre-
+# novembre 2023, sessioni (training all'80%) / punti / quota del punto piu' usato:
+#   Glasgow City      31896 (25517) / 209 / 0.056   urbano (UR8 1), DC 22%
+#   Dundee City       31706 (25365) / 102 / 0.043   urbano (UR8 1), DC 75%
+#   Shetland Islands   1701  (1361) /  33 / 0.175   rurale remoto (UR8 8), DC 35%
+# ACN: 25200, 26829, 1341. Deroga alla regola: Shetland ha 33 punti (regola 5-20); nessun
+# council della taglia giusta ne ha meno di 31. Durate oltre 24 ore (280, 194, 26) tenute
+# come sono, uguali per tutti i council: l'adapter le legge come stringa, senza troncarle.
+# Sessioni senza council escluse dal filtro dei client.
+
+experiment:
+  name: chargeshield_sc3_groupnorm
+  fl_rounds: 10
+  seed: 42
+  epsilon: 1.0
+  delta: 1.0e-05
+  max_grad_norm: 1.0
+dataset_adapter: chargeplace_scotland
+chargeplace_scotland:
+  metadata_dir: datasets/alt/chargeplace_scotland/CPID_information
+  clients:
+  - Glasgow City
+  - Dundee City
+  - Shetland Islands
+  session_files:
+  - datasets/alt/chargeplace_scotland/Sessions_from_CPS/SEP-23.xlsx
+  - datasets/alt/chargeplace_scotland/Sessions_from_CPS/OCT-23.xlsx
+  - datasets/alt/chargeplace_scotland/Sessions_from_CPS/NOV-23.xlsx
+ml:
+  input_dim: 4
+  lr: 0.001
+  epochs: 50
+  batch_size: 32
+  proximal_mu: 0.01
+  feature_names:
+  - total_energy_kwh
+  - max_power_kw
+  - hour_of_day
+  - duration_hours
+  norm: group
+output:
+  experiments_dir: experiments
+lira:
+  n_shadow: 16
+byzantine_attack:
+  enabled: false
+  attack_type: gradient_scaling
+  byzantine_node: synthetic_1
+  scale_factor: 10

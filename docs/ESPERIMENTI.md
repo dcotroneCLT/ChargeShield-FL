@@ -1,6 +1,6 @@
 # ChargeShield-FL — Esperimenti da eseguire
 
-> **Stato: documento CANONICO.** Aggiornato il 2026-09-30 (revisione: costo, E-C, controlli (a) e (b) eseguiti, griglia del punto operativo, canary su più siti, E-D con DP, campagna E-B, braccio con DP di E-E; il 2026-09-30 esito dello screening di C e del solo clipping, config e run di prova del canary su più siti). Sostituisce,
+> **Stato: documento CANONICO.** Aggiornato il 2026-10-14 (Scozia ridotta con DP per record e per soggetto, controllo ACN a quattro feature, una run alla volta per macchina, previsioni; prima, il 2026-09-30: revisione: costo, E-C, controlli (a) e (b) eseguiti, griglia del punto operativo, canary su più siti, E-D con DP, campagna E-B, braccio con DP di E-E; il 2026-09-30 esito dello screening di C e del solo clipping, config e run di prova del canary su più siti). Sostituisce,
 > per gli esperimenti ancora da lanciare, il vecchio `TestRoadmap_DSN2027.md`, eliminato
 > il 2026-09-22 e recuperabile dalla storia git. Ogni
 > voce dice quale RQ serve, quale conclusione può cambiare, cosa deve essere vero
@@ -2009,6 +2009,7 @@ perché l'aggregato combina pochi contributi.
   authority, postcode, velocità) e popolazioni (`Population_data/`). Fonte: Strathclyde, DOI 10.15129/1f431af7-5caa-4840-a9ab-c1f3b521e033
   (confermata il 2026-10-12, `PROVENIENZA.txt` nella cartella).
 - Prerequisiti: verificare la licenza; preprocessing con le stesse feature di ACN dove esistono;
+  [superato il 2026-10-14: replica ridotta a tre council, vedi la sezione "Scozia: replica ridotta"]
   partizione decisa il 2026-10-13: prima 32 client, uno per local authority, con
   tutte le loro sessioni e nessun sottocampionamento (sottocampionare riprodurrebbe il limite di ACN); poi, se
   serve, una replica a 3 client. Config `config/experiment_scotland_32client.yaml`: 4 feature informative (le 6
@@ -2037,6 +2038,94 @@ deployment".
 
 **Macchine.** Ogni blocco seed × condizione va su una sola macchina; i confronti fra condizioni si fanno solo
 dentro la stessa macchina.
+
+## Scozia: replica ridotta e controllo ACN a quattro feature (decisione del 2026-10-14)
+
+**Decisione della dottoranda, 14 ottobre.** La Scozia si fa nella forma ridotta del documento del 12 ottobre
+("chiudere il paper DSN 2027"): tre council con la forma di ACN, sola utilità, stessa configurazione di ACN,
+tutte le celle sulla stessa macchina. In più, su richiesta della dottoranda, la DP per record e la DP per
+soggetto anche sulla Scozia. La campagna a 32 council del 13 ottobre è rinviata a dopo il paper (materiale per
+la tesi): le sue righe sono in `coda_scozia32_tesi.csv` del pacchetto offline e non si lanciano prima del
+congelamento. La coda a 32 council avviata il 14 ottobre sul Mac di Domenico va fermata; le run che ha
+prodotto non entrano in nessuna analisi.
+
+**Conteggi.** `scripts/conteggi_scozia.py` legge i file mensili con lo stesso adapter degli esperimenti e
+scrive in `risultati/scozia_conteggi/` le tabelle per council e mese (sessioni, punti di ricarica, quota del
+punto più usato, energia, durata e ora mediane, quota serale e feriale, sessioni oltre 24 ore, quota DC) e i
+totali per council con la classe urbano-rurale (UR8). Eseguito il 14 ottobre su una copia dei file del
+pacchetto offline: 3 120 427 sessioni lette, 17 383 senza council (11 978 nell'ottobre 2022).
+
+**Scelta, dentro la regola del 12 ottobre** (confermata dalla dottoranda il 14 ottobre, prima del lancio). Settembre, ottobre e novembre 2023: mesi consecutivi nel mezzo del periodo, lontani dai primi due
+mesi e da dicembre, senza crolli o picchi nei tre council. Glasgow ha un cambio di regime fra marzo e maggio
+2023 (da circa 27 000 a circa 10 000 sessioni al mese): i mesi scelti stanno dopo.
+
+| council | sessioni (training all'80%) | punti | punto più usato | profilo |
+|---|---|---|---|---|
+| Glasgow City | 31 896 (25 517) | 209 | 5.6% | urbano (UR8 1), DC 22% |
+| Dundee City | 31 706 (25 365) | 102 | 4.3% | urbano (UR8 1), DC 75% |
+| Shetland Islands | 1 701 (1 361) | 33 | 17.5% | rurale remoto (UR8 8), DC 35% |
+
+ACN: 25 200, 26 829 e 1 341. Nella run di prova lo split del codice ha dato 25 540, 25 338 e 1 364 sessioni
+di training. Deroga approvata dalla dottoranda il 14 ottobre, da riferire al supervisore (la regola e' sua): la regola
+chiede per il council piccolo da 5 a 20 punti di ricarica;
+nessun council della taglia giusta (Na h-Eileanan an Iar, Shetland, Orkney) ne ha meno di 31. Shetland
+rispetta l'altro vincolo (nessun punto oltre il 40% delle sessioni). Le sessioni oltre 24 ore (280, 194 e 26
+nei tre council) restano come sono, uguali per tutti: l'adapter le legge come stringa e non le tronca. Scelta
+e tabella sono anche in testa ai config `experiment_sc3*.yaml`.
+
+**Celle** (coda `coda_domenico.csv` del pacchetto offline, Mac di Domenico). 5 seed (42, 123, 456, 789,
+1234), 10 round, 50 epoche, quattro feature, LiRA e Shadow saltati (Yeom resta).
+- Senza DP, FedAvg e FedProx (10 run); DP per client completa a ε = 64, C = 1 (10); solo taglio e solo
+  rumore (20); μ = 0.001 e 0.1 con DP (10). Totale 50.
+- DP per record (DP-SGD, C = 1, σ = 1, FedProx, `experiment_sc3_recorddp.yaml`): ε di Poisson circa 30,
+  come σ = 1 su ACN. 5 run, ciascuna di qualche ora.
+- DP per soggetto (colonnina, σ = 5, C = 1, 8 colonnine attese per passo, FedProx,
+  `experiment_sc3_subjectdp.yaml`): ε atteso 13.9, 6.3 e 4.2 su Shetland, Dundee e Glasgow. 5 run.
+- Riferimento senza DP con la stessa normalizzazione (GroupNorm) delle due celle precedenti,
+  `experiment_sc3_groupnorm.yaml`. 5 run.
+- Prima di tutto una run di prova cronometrata (`sc3_prova_s42`: seed 42, senza DP, FedProx): le altre run
+  della Scozia partono solo dopo.
+
+**Controllo ACN a quattro feature** (stessa coda, stessa macchina della Scozia). Le otto celle di RQ3 a 5
+seed, 40 run, sola utilità come la Scozia. Config `experiment_acn4f*.yaml`: cambiano solo `ml.input_dim` e
+`ml.feature_names` rispetto alle celle RQ3 di ACN; con quattro feature il modello prende la capacità
+predefinita (16, 8), latente 4, come in Scozia.
+
+**Verifiche fatte il 14 ottobre**, su una copia del codice con i dati reali, 1 round e 1 epoca: le config
+`experiment_sc3_eps64` (solo taglio), `experiment_sc3_recorddp`, `experiment_sc3_subjectdp` e
+`experiment_acn4f_eps64` caricano i dati e terminano senza errori. Servono solo a dire che le config girano,
+non dicono nulla sulle previsioni.
+
+**Macchine e protocollo.** Una run alla volta per macchina (`CLAUDE.md`; confermato dalla dottoranda il 14
+ottobre: macchine diverse possono lavorare in parallelo). `esegui_coda.py` lancia ora una run alla volta
+(`--max-run`, default 1). Mac di Domenico: Scozia ridotta e controllo ACN a quattro feature, circa 50 ore-run.
+Mac di Susy: blocco ACN (`coda_mac.csv`), compreso il controllo positivo per persona a 30 copie, circa 160
+ore-run. Stesso pacchetto sui due Mac: Python 3.12.14, numpy 2.4.4, torch 2.14.1; thread fissati dalla coda.
+Le prime run ACN del 14 ottobre sono partite sei alla volta. Prova su Linux con una copia del codice: due run
+lanciate insieme danno gli stessi numeri, cifra per cifra, di una run da sola con gli stessi thread; con un
+numero di thread diverso la loss cambia alla quarta cifra significativa. Sul Mac la stessa verifica è in coda:
+`verifica_parallelo_acn_canaryA_nodp_s42` rifà da sola una run già fatta in parallelo, e i due JSON devono
+coincidere.
+
+**Previsioni**, scritte il 14 ottobre prima di qualunque run della campagna. Sono le quattro del documento
+del 12 ottobre, sulla Scozia ridotta e sul controllo ACN a quattro feature:
+1. Norme: FedAvg sopra C in tutti i round; FedProx sotto C dal round 3-5.
+2. Solo taglio entro 1.5 volte la DP completa per FedAvg; solo rumore entro 1.5 volte la DP completa per
+   FedProx.
+3. Solo Scozia (il controllo ACN non ha la curva in μ): minimo della curva di μ sotto DP intorno a 0.01,
+   sulla media dei round 6-10.
+4. Senza DP, FedAvg non peggio di FedProx.
+
+5. DP per record (σ = 1), confermata dalla dottoranda il 14 ottobre: costo sul modello rilasciato (loss
+   sull'holdout al round 10) circa 2 volte il riferimento GroupNorm, come su ACN (claim 2).
+
+Se una previsione non regge, si scrive come condizione al contorno, con i numeri. DP per soggetto: nessuna
+previsione quantitativa, perché su ACN manca ancora un risultato di riferimento; il costo e l'ε si riportano
+come misura, non come verifica di una previsione.
+
+**Analisi.** `scripts/analisi_clipping_json.py` per le norme (sono nel JSON); media geometrica della loss
+sull'holdout al round 10 e sulla media dei round 6-10; rapporti appaiati per seed (solo taglio su DP
+completa, solo rumore su DP completa, per algoritmo); t sul logaritmo.
 
 ## Privacy di gruppo e DP per soggetto (2026-10-13)
 
@@ -2272,6 +2361,10 @@ somma A+B e' piu' alta che per sito. Il claim regge se la differenza appaiata su
 altrimenti si scrive "la partizione non cambia il leakage rilevabile, ne' naturale ne' indotto".
 
 ## Rinviato o escluso
+
+- Scozia a 32 council, tutte le sessioni, con attacchi, canary e partizione IID (decisa il 2026-10-13):
+  rinviata il 2026-10-14 a dopo il paper, per la tesi. Config `experiment_scotland_32client*.yaml` e
+  `experiment_scotland32_*.yaml`; righe in `coda_scozia32_tesi.csv` del pacchetto offline.
 
 RQ4 (rilevamento della MIA passiva) esclusa per threat model. ByzantineDetector
 end-to-end e adaptive clipping: lavoro futuro dichiarato. Il secondo dataset è nella
