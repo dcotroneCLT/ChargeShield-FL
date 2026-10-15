@@ -2124,7 +2124,7 @@ non dicono nulla sulle previsioni.
 
 **Macchine e protocollo.** Una run alla volta per macchina (`CLAUDE.md`; confermato dalla dottoranda il 14
 ottobre: macchine diverse possono lavorare in parallelo). `esegui_coda.py` lancia ora una run alla volta
-(`--max-run`, default 1). Mac di Domenico: Scozia ridotta e controllo ACN a quattro feature, circa 50 ore-run.
+(`--max-run`, default 1). Mac di Domenico: Scozia ridotta e controllo ACN a quattro feature, circa 78 ore-run.
 Mac di Susy: blocco ACN (`coda_mac.csv`), compreso il controllo positivo per persona a 30 copie, circa 160
 ore-run. Stesso pacchetto sui due Mac: Python 3.12.14, numpy 2.4.4, torch 2.14.1; thread fissati dalla coda.
 Le prime run ACN del 14 ottobre sono partite sei alla volta. Prova su Linux con una copia del codice: due run
