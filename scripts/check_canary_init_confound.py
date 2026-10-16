@@ -21,6 +21,7 @@ from scripts.run_experiments import (  # noqa: E402
     entity_aware_split,
     inject_canaries,
     compute_feature_stats,
+    statistiche_normalizzazione,
     normalize_sessions,
     _mia_feature_names,
 )
@@ -104,9 +105,9 @@ def main():
     train, holdout = inject_canaries(train, holdout, cfg, seed)
 
     features = _mia_feature_names(cfg)
-    stats = compute_feature_stats(train, features)
-    train = normalize_sessions(train, stats, features)
-    holdout = normalize_sessions(holdout, stats, features)
+    stats, clip, _ = statistiche_normalizzazione(cfg, train, features)   # 2026-10-16
+    train = normalize_sessions(train, stats, features, clip=clip)
+    holdout = normalize_sessions(holdout, stats, features, clip=clip)
 
     members = [s for s in train if s.get("_canary_role") == "member"]
     nonmembers = [s for s in holdout if s.get("_canary_role") == "nonmember"]

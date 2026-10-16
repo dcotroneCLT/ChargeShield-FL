@@ -36,6 +36,13 @@ ml:
     noise_multiplier: 5.0
     expected_subjects_per_step: 32
     max_records_per_subject: 64
+    # 2026-10-16: sessioni senza userID raggruppate in profili di abitudine
+    # (src/ml/profili_abitudini.py), circa 100 sessioni di training per profilo;
+    # misura in docs/Segnalazioni, voce 88.
+    senza_chiave: profili
+    profili:
+      dimensione_media: 100
+      peso_gruppo: 1.0
 output:
   experiments_dir: experiments
 lira:

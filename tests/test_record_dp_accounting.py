@@ -41,8 +41,9 @@ def _cfg_annidato(rounds=3, epochs=1000, sigma=5.0, enabled=True, delta=DELTA):
 
 
 def test_canary_poisson_riproduce_i_valori_pubblicati():
-    eps5, steps, q = epsilon_poisson(1924, 32, 1000, 3, 5.0, DELTA)
-    eps1, _, _ = epsilon_poisson(1924, 32, 1000, 3, 1.0, DELTA)
+    # valori pubblicati prima del 2026-10-16: adiacenza add/remove (RDP)
+    eps5, steps, q = epsilon_poisson(1924, 32, 1000, 3, 5.0, DELTA, relazione="add_remove")
+    eps1, _, _ = epsilon_poisson(1924, 32, 1000, 3, 1.0, DELTA, relazione="add_remove")
     assert steps == (1924 // 32) * 1000 * 3 == 180000
     assert q == pytest.approx(32 / 1924)
     assert eps5 == pytest.approx(7.15, abs=0.02)
@@ -52,9 +53,12 @@ def test_canary_poisson_riproduce_i_valori_pubblicati():
 def test_regressione_round_letti_da_experiment():
     # Il bug: fl_rounds letto dalla radice di cfg -> 1 round -> 3.79 invece di 7.15.
     f = record_dp_fields(_cfg_annidato(), n_per_client={"office1": 1924})
-    eps_un_round, _, _ = epsilon_poisson(1924, 32, 1000, 1, 5.0, DELTA)
+    eps_un_round, _, _ = epsilon_poisson(1924, 32, 1000, 1, 5.0, DELTA, relazione="add_remove")
     assert eps_un_round == pytest.approx(3.79, abs=0.02)
-    assert f["epsilon_record_dp"] == pytest.approx(7.15, abs=0.02)
+    pc = f["record_dp_accounting"]["per_client"]["office1"]
+    assert pc["epsilon_add_remove"] == pytest.approx(7.15, abs=0.02)
+    assert f["epsilon_record_dp"] == pytest.approx(
+        epsilon_poisson(1924, 32, 1000, 3, 5.0, DELTA)[0])
     assert f["record_dp_accounting"]["fl_rounds"] == 3
 
 
@@ -80,10 +84,13 @@ def test_senza_n_per_client_non_usa_il_totale():
 
 def test_per_client_il_peggiore_e_il_client_piu_piccolo():
     acc = record_dp_accounting(EB_CLIENTS, 32, 50, 10, 1.0, DELTA)
+    ear = {c: v["epsilon_add_remove"] for c, v in acc["per_client"].items()}
+    assert ear["jpl"] == pytest.approx(4.82, abs=0.02)
+    assert ear["caltech"] == pytest.approx(5.01, abs=0.02)
+    assert ear["office1"] == pytest.approx(30.4, abs=0.1)
     eps = {c: v["epsilon"] for c, v in acc["per_client"].items()}
-    assert eps["jpl"] == pytest.approx(4.82, abs=0.02)
-    assert eps["caltech"] == pytest.approx(5.01, abs=0.02)
-    assert eps["office1"] == pytest.approx(30.4, abs=0.1)
+    # sostituzione (default dal 2026-10-16) piu' severa di add/remove
+    assert all(eps[c] > ear[c] for c in eps)
     assert acc["client_peggiore"] == "office1"
     assert acc["epsilon_max"] == max(eps.values())
     f = record_dp_fields(_cfg_annidato(rounds=10, epochs=50, sigma=1.0),
@@ -134,3 +141,14 @@ def test_sigma_zero_nessuna_garanzia():
 def test_client_con_meno_record_del_batch():
     eps, steps, _ = epsilon_poisson(20, 32, 50, 10, 1.0, DELTA)
     assert (eps, steps) == (0.0, 0)
+
+
+
+def test_sostituzione_con_pld_come_dp_accounting():
+    """Default dal 2026-10-16: sostituzione di un record, PLD."""
+    import dp_accounting
+    from dp_accounting import dp_event, pld
+    eps, steps, q = epsilon_poisson(1341, 32, 50, 10, 1.0, DELTA)
+    acc = pld.PLDAccountant(neighboring_relation=dp_accounting.NeighboringRelation.REPLACE_ONE)
+    acc.compose(dp_event.PoissonSampledDpEvent(q, dp_event.GaussianDpEvent(1.0)), steps)
+    assert eps == pytest.approx(acc.get_epsilon(DELTA))

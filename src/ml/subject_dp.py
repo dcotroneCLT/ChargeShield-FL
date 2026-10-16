@@ -27,8 +27,10 @@ Chi e' un soggetto (`subject_of`):
     il caso "una persona con molte sessioni simili" che la DP per record non
     copre;
   - altrimenti il valore della chiave scelta;
-  - se la chiave manca (sessioni ACN senza userID), la sessione e' un soggetto
-    a se' stante.
+  - se la chiave manca (sessioni ACN senza userID): dal 2026-10-16 il profilo
+    di abitudine della sessione (`senza_chiave: profili`, src/ml/
+    profili_abitudini.py, profili stimati su una riserva dell'holdout); con
+    `senza_chiave: singoli` la sessione e' un soggetto a se' stante (prima).
 
 Soggetti presenti in piu' client (utenti ACN che ricaricano in piu' siti). Ogni
 client aggiunge il proprio rumore, quindi la perdita di privacy del soggetto si
@@ -42,12 +44,12 @@ ULDP-FL lo si ottiene con un protocollo di intersezione privata; qui la
 simulazione lo calcola direttamente).
 
 Non contabilizzati (da dichiarare insieme all'epsilon):
-  - le statistiche min-max calcolate sui dati di training prima del meccanismo;
-  - il numero di sessioni del client e la loss media di training, che il
-    client invia al server senza rumore (`GradientUpdate.n_samples`, `loss`):
-    togliere un soggetto con k sessioni cambia n_samples di k;
   - il numero di soggetti N di ogni client, trattato come pubblico: q e il
-    numero di passi dipendono da N (come in Opacus).
+    numero di passi dipendono da N (come in Opacus);
+  - la funzione sessione -> profilo, stimata su dati esterni al training.
+Dal 2026-10-16 non sono piu' fra i non contabilizzati: la normalizzazione
+(limiti pubblici, non dai dati), i pesi di aggregazione (pubblici e fissi) e
+la loss di training (non inviata nelle celle con DP).
 Validita' delle chiavi: i soggetti si contano sulle sole righe valide (feature
 presenti e numeriche), con la stessa regola del trainer; se il trainer e
 l'accountant vedessero N diversi, run_fl_rounds() si ferma con un errore.
@@ -75,16 +77,46 @@ DEFAULTS: dict[str, Any] = {
     "noise_multiplier": 0.0,
     "expected_subjects_per_step": 32,
     "max_records_per_subject": 64,
+    # Sessioni senza chiave (2026-10-16): "profili" = soggetto dal profilo di
+    # abitudine (src/ml/profili_abitudini.py), "singoli" = ogni sessione un
+    # soggetto (comportamento precedente).
+    "senza_chiave": "profili",
+    "profili": {"dimensione_media": 10.0, "peso_gruppo": 1.0},
 }
 
 _VUOTI = ("", "none", "nan", "null")
 
 
-def _enabled(v: Any) -> bool:
-    """bool("false") e' True: le stringhe si leggono per valore."""
+_VERI = ("1", "true", "yes", "si", "sì", "on")
+_FALSI = ("0", "false", "no", "off", "")
+
+
+def flag(v: Any) -> bool:
+    """Interruttore di config letto in modo stretto (2026-10-16, Segnalazioni R
+    voce 80): bool("false") e' True, quindi le stringhe si leggono per valore;
+    un valore non riconosciuto e' un errore, non un "acceso" silenzioso."""
+    if v is None:
+        return False
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)) and v in (0, 1):
+        return bool(v)
     if isinstance(v, str):
-        return v.strip().lower() in ("1", "true", "yes", "si", "sì", "on")
-    return bool(v)
+        s = v.strip().lower()
+        if s in _VERI:
+            return True
+        if s in _FALSI:
+            return False
+    raise ValueError(f"valore di interruttore non riconosciuto: {v!r}")
+
+
+def record_dp_on(ml_cfg: dict | None) -> bool:
+    """`ml.record_dp.enabled` letto con `flag` (unico punto per trainer,
+    attacchi e accounting)."""
+    return flag(((ml_cfg or {}).get("record_dp") or {}).get("enabled", False))
+
+
+_enabled = flag
 
 
 def subject_dp_config(ml_cfg: dict | None) -> dict[str, Any]:
@@ -92,6 +124,8 @@ def subject_dp_config(ml_cfg: dict | None) -> dict[str, Any]:
     raw = (ml_cfg or {}).get("subject_dp") or {}
     out = {**DEFAULTS, **raw}
     out["enabled"] = _enabled(out["enabled"])
+    if out["senza_chiave"] not in ("profili", "singoli"):
+        raise ValueError(f"subject_dp.senza_chiave non valido: {out['senza_chiave']!r}")
     return out
 
 
@@ -125,8 +159,10 @@ def row_valid(session: dict[str, Any], features: list[str] | None) -> bool:
         if val is None:
             return False
         try:
-            float(val)
+            x = float(val)
         except (TypeError, ValueError):
+            return False
+        if not math.isfinite(x):    # 2026-10-16: inf/nan aggirerebbero il taglio
             return False
     return True
 
@@ -139,6 +175,9 @@ def subject_of(session: dict[str, Any], key: str, fallback: str) -> str:
     v = _chiave(session.get(key))
     if v is not None:
         return f"{key}:{v}"
+    p = session.get("_profilo")   # assegnato solo con senza_chiave: profili
+    if p is not None:
+        return f"profilo:{p}"
     return f"solo:{fallback}"
 
 
@@ -228,6 +267,28 @@ def subject_stats(
     }
 
 
+RELAZIONI = ("sostituzione", "add_remove")
+
+
+def accountant(relazione: str = "sostituzione"):
+    """Accountant per la relazione di adiacenza (2026-10-16, revisione).
+
+    "sostituzione" (default): si sostituisce un record o un soggetto, il numero
+    n resta fisso. E' la relazione coerente con quello che il server vede: n
+    (e quindi q = B/n e i pesi di aggregazione) e' pubblico. PLD, che supporta
+    la sostituzione con campionamento di Poisson.
+    "add_remove": si aggiunge o toglie un record o un soggetto (RDP); vale
+    solo se n non e' osservabile, qui riportato per confronto con la
+    letteratura."""
+    import dp_accounting
+    from dp_accounting import pld, rdp
+    if relazione == "sostituzione":
+        return pld.PLDAccountant(neighboring_relation=dp_accounting.NeighboringRelation.REPLACE_ONE)
+    if relazione == "add_remove":
+        return rdp.RdpAccountant()
+    raise ValueError(f"relazione di adiacenza non valida: {relazione!r}")
+
+
 def _event(q: float, noise_multiplier: float):
     from dp_accounting import dp_event
 
@@ -238,15 +299,14 @@ def _event(q: float, noise_multiplier: float):
 def epsilon_single_client(
     n_subjects: int, expected_per_step: int, epochs: int, rounds: int,
     noise_multiplier: float, delta: float, weight: float = 1.0,
+    relazione: str = "sostituzione",
 ) -> tuple[float, float, int]:
     """(epsilon, q, passi) per un soggetto con peso `weight` in un client."""
-    from dp_accounting import rdp
-
     q, per_epoch = sampling_schedule(n_subjects, expected_per_step)
     steps = per_epoch * epochs * rounds
     if steps == 0 or weight <= 0.0:
         return 0.0, q, steps
-    acc = rdp.RdpAccountant()
+    acc = accountant(relazione)
     acc.compose(_event(q, noise_multiplier / weight), steps)
     return float(acc.get_epsilon(target_delta=delta)), q, steps
 
@@ -254,12 +314,10 @@ def epsilon_single_client(
 def epsilon_multi_client(
     weights: dict[str, float], per_client_subjects: dict[str, int],
     expected_per_step: int, epochs: int, rounds: int,
-    noise_multiplier: float, delta: float,
+    noise_multiplier: float, delta: float, relazione: str = "sostituzione",
 ) -> float:
-    """Epsilon di un soggetto presente in piu' client: RDP sommate sui client."""
-    from dp_accounting import rdp
-
-    acc = rdp.RdpAccountant()
+    """Epsilon di un soggetto presente in piu' client: composizione sui client."""
+    acc = accountant(relazione)
     for cid, w in weights.items():
         if w <= 0.0:
             continue
@@ -281,7 +339,10 @@ def subject_dp_accounting(
     for cid, n in pcs.items():
         eps, q, steps = epsilon_single_client(
             int(n), expected_per_step, epochs, rounds, noise_multiplier, delta)
-        per_client[str(cid)] = {"n_soggetti": int(n), "q": q, "passi": steps, "epsilon": eps}
+        eps_ar, _, _ = epsilon_single_client(
+            int(n), expected_per_step, epochs, rounds, noise_multiplier, delta, relazione="add_remove")
+        per_client[str(cid)] = {"n_soggetti": int(n), "q": q, "passi": steps, "epsilon": eps,
+                                "epsilon_add_remove": eps_ar}
     multi = []
     for item in stats.get("multi_client_weight_vectors") or []:
         eps = epsilon_multi_client(item["weights"], pcs, expected_per_step, epochs,

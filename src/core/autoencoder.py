@@ -78,7 +78,7 @@ class Encoder(nn.Module):
         input_dim: int = INPUT_DIM,
         latent_dim: int = 4,
         hidden_dims: tuple[int, int] | None = None,
-        norm: str = "batch",
+        norm: str = "group",  # default dal 2026-10-16
     ):
         """
         Args:
@@ -91,9 +91,10 @@ class Encoder(nn.Module):
         h1, h2 = hidden_dims if hidden_dims is not None else (16, 8)
 
         # norm (Sprint 10zz+113): scelta del layer di normalizzazione.
-        #   "batch" (default) — nn.BatchNorm1d, comportamento storico,
-        #       byte-per-byte identico a tutte le celle gia' pubblicate.
-        #   "group"  — nn.GroupNorm(1, dim), equivalente a LayerNorm su 2-D.
+        #   "batch" — nn.BatchNorm1d, comportamento storico (default fino al
+        #       2026-10-15): serve norm="batch" per riprodurre le celle vecchie.
+        #   "group" (default dal 2026-10-16) — nn.GroupNorm(1, dim), equivalente
+        #       a LayerNorm su 2-D.
         #       OBBLIGATORIO con DP a livello di record, per due ragioni:
         #       (a) Tecnica: il clipping per-esempio richiede microbatch di
         #           dimensione 1, e BatchNorm1d in training solleva
@@ -221,7 +222,7 @@ class Autoencoder(nn.Module):
         latent_dim: int = 4,
         threshold: float = 0.1,
         hidden_dims: tuple[int, int] | None = None,
-        norm: str = "batch",
+        norm: str = "group",  # default dal 2026-10-16
     ):
         """
         Args:

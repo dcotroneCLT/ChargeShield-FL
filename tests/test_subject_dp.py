@@ -72,7 +72,7 @@ class TestSoggetti:
 class TestAccounting:
     def test_un_client_coincide_con_dp_accounting(self):
         from dp_accounting import dp_event, rdp
-        eps, q, steps = sdp.epsilon_single_client(100, 10, 5, 3, 1.5, 1e-5)
+        eps, q, steps = sdp.epsilon_single_client(100, 10, 5, 3, 1.5, 1e-5, relazione="add_remove")
         acc = rdp.RdpAccountant()
         acc.compose(dp_event.PoissonSampledDpEvent(0.1, dp_event.GaussianDpEvent(1.5)), 10 * 5 * 3)
         assert q == pytest.approx(0.1) and steps == 150
@@ -380,4 +380,5 @@ def test_architettura_coerente_con_enabled_stringa():
     devono usare la stessa norm (trovato nella review finale)."""
     ml = _ml(enabled="false")
     t = AutoencoderTrainer(config=ml, node_id="n", cluster_id="c")
-    assert t.norm == run_exp._autoencoder_arch_kwargs({"ml": ml})["norm"] == "batch"
+    # default "group" dal 2026-10-16 (prima "batch")
+    assert t.norm == run_exp._autoencoder_arch_kwargs({"ml": ml})["norm"] == "group"

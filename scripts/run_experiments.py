@@ -47,7 +47,9 @@ from ml.gradient_manager import GradientManager
 from ml.ml_plane import FLArtifactCollector, MLPlane
 from ml.base_ml import MLPlaneEvent
 from ml.record_dp_accounting import record_dp_fields as _record_dp_fields_impl
+from ml.client_dp_accounting import client_dp_fields as _client_dp_fields
 from ml.subject_dp import (
+    record_dp_on as _record_dp_on,
     cross_client_weights as _subject_cross_client_weights,
     subject_dp_config as _subject_dp_config,
     subject_dp_fields as _subject_dp_fields,
@@ -172,9 +174,9 @@ def _autoencoder_arch_kwargs(cfg: dict) -> dict[str, Any]:
         # subject_dp letto con la stessa funzione del trainer (che tratta la
         # stringa "false" come falso): un bool() diretto darebbe "group" qui e
         # "batch" nel trainer, e gli attacchi salterebbero per shape mismatch.
-        "norm": ("group" if ((ml_cfg.get("record_dp") or {}).get("enabled")
+        "norm": ("group" if (_record_dp_on(ml_cfg)
                              or _subject_dp_config(ml_cfg)["enabled"])
-                 else str(ml_cfg.get("norm", "batch"))),
+                 else str(ml_cfg.get("norm", "group"))),  # default "group" dal 2026-10-16, come il trainer
     }
 
 
@@ -1059,10 +1061,13 @@ def normalize_sessions(
     sessions: list[dict[str, Any]],
     stats: dict[str, tuple[float, float]],
     features: list[str],
+    clip: bool = False,
 ) -> list[dict[str, Any]]:
     """
     Applica min-max scaling [0,1] alle feature continue.
-    stats deve provenire da compute_feature_stats(train_sessions, ...).
+    stats: da compute_feature_stats(train_sessions, ...) (metodo storico) o dai
+    limiti pubblici (statistiche_normalizzazione). clip=True porta i valori
+    fuori dai limiti sugli estremi (con i limiti pubblici).
     """
     normalized = []
     for s in sessions:
@@ -1072,9 +1077,73 @@ def normalize_sessions(
             if val is None:
                 continue
             fmin, fmax = stats[feat]
-            s[feat] = (float(val) - fmin) / (fmax - fmin)
+            x = (float(val) - fmin) / (fmax - fmin)
+            if clip and math.isfinite(x):
+                x = min(1.0, max(0.0, x))
+            s[feat] = x
         normalized.append(s)
     return normalized
+
+
+# Normalizzazione con limiti pubblici (2026-10-16, Segnalazioni R voce 76): il
+# min-max calcolato sul training dipende dai dati (togliere la persona che
+# tiene il massimo riscala tutti i record) e resta fuori dalla DP. I limiti
+# qui sotto vengono dal dominio, non dai dati, e i valori fuori si portano sul
+# limite. PROPOSTA del 16 ottobre da confermare: energia fino alla capacita'
+# delle batterie, potenza fino ai caricatori DC dei siti, richieste e durate
+# fino a due giorni.
+LIMITI_PUBBLICI = {
+    "acn": {
+        "total_energy_kwh": (0.0, 100.0),
+        "max_power_kw": (0.0, 50.0),
+        "kwh_requested": (0.0, 150.0),
+        "minutes_available": (0.0, 2880.0),
+        "hour_of_day": (0.0, 24.0),
+        "duration_hours": (0.0, 48.0),
+        "hour_of_day_sin": (-1.0, 1.0),
+        "hour_of_day_cos": (-1.0, 1.0),
+        # periodo coperto dal dataset ACN pubblicato (2018-2021): 1/1/2018 - 1/1/2022
+        "start_time_epoch": (1514764800.0, 1640995200.0),
+    },
+    "chargeplace_scotland": {
+        "total_energy_kwh": (0.0, 150.0),
+        "max_power_kw": (0.0, 350.0),
+        # assenti nei dati scozzesi (costanti a 0): stessi limiti di ACN
+        "kwh_requested": (0.0, 150.0),
+        "minutes_available": (0.0, 2880.0),
+        "hour_of_day": (0.0, 24.0),
+        "duration_hours": (0.0, 48.0),
+        "hour_of_day_sin": (-1.0, 1.0),
+        "hour_of_day_cos": (-1.0, 1.0),
+        # file mensili usati (2023): 1/1/2023 - 1/1/2024
+        "start_time_epoch": (1672531200.0, 1704067200.0),
+    },
+}
+
+
+def statistiche_normalizzazione(
+    cfg: dict, train_sessions: list[dict[str, Any]], features: list[str],
+) -> tuple[dict[str, tuple[float, float]], bool, dict[str, Any]]:
+    """(stats, clip, descrizione) secondo `ml.normalization.method`:
+    "limiti_pubblici" (default dal 2026-10-16; limiti da `ml.normalization.bounds`
+    o da LIMITI_PUBBLICI per il dataset) o "minmax_training" (storico)."""
+    norm_cfg = (cfg.get("ml", {}) or {}).get("normalization") or {}
+    metodo = norm_cfg.get("method", "limiti_pubblici")
+    if metodo == "minmax_training":
+        stats = compute_feature_stats(train_sessions, features)
+        return stats, False, {"method": metodo, "stats": {k: list(v) for k, v in stats.items()}}
+    if metodo != "limiti_pubblici":
+        raise ValueError(f"ml.normalization.method non valido: {metodo!r}")
+    dataset = str(cfg.get("dataset_adapter") or "acn")   # stessa chiave di load_sessions
+    limiti = {**LIMITI_PUBBLICI.get(dataset, {}),
+              **{k: tuple(v) for k, v in (norm_cfg.get("bounds") or {}).items()}}
+    mancanti = [f for f in features if f not in limiti]
+    if mancanti:
+        raise ValueError(f"limiti pubblici mancanti per {mancanti} (dataset {dataset!r}): "
+                         "dichiararli in ml.normalization.bounds")
+    stats = {f: (float(limiti[f][0]), float(limiti[f][1])) for f in features}
+    return stats, True, {"method": metodo, "dataset": dataset,
+                         "bounds": {k: list(v) for k, v in stats.items()}}
 
 # ── FL Experiment ──────────────────────────────────────────────────────────────
 
@@ -1184,6 +1253,15 @@ def run_fl_rounds(
             + " — nessuna garanzia DP, solo per separare taglio e rumore."
         )
 
+    # 2026-10-16 (Segnalazioni R voce 74): con BatchNorm i buffer running_mean e
+    # running_var escono dal client senza taglio ne' rumore, quindi la DP per
+    # client non coprirebbe tutto cio' che il server riceve.
+    if not no_dp and _autoencoder_arch_kwargs(cfg)["norm"] == "batch":
+        raise ValueError(
+            "DP per client con norm: batch: i buffer BatchNorm non sono protetti. "
+            "Usare norm: group (default dal 2026-10-16)."
+        )
+
     if cluster_sessions is not None:
         # Sessioni già raggruppate per sito/cluster reale (2026-07-22) — vedi
         # group_sessions_by_site()/inject_synthetic_clients(). `sessions` (il
@@ -1226,7 +1304,10 @@ def run_fl_rounds(
     for cid in cluster_ids:
         # Propaga il seed sperimentale nella config ml così AutoencoderTrainer
         # lo usa per il DataLoader generator → shuffle deterministico per seed.
-        trainer_cfg = {**ml_cfg, "seed": exp_cfg.get("seed", 42)}
+        trainer_cfg = {**ml_cfg, "seed": exp_cfg.get("seed", 42),
+                       # 2026-10-16: nelle celle con DP la loss non esce dal client
+                       "trasmetti_loss": no_dp and not _record_dp_on(ml_cfg)
+                       and not _subject_dp_config(ml_cfg)["enabled"]}
         trainers[cid] = AutoencoderTrainer(
             config=trainer_cfg,
             node_id=f"{cid}-01",
@@ -1292,6 +1373,7 @@ def run_fl_rounds(
         "epsilon":       exp_cfg["epsilon"],
         "delta":         exp_cfg["delta"],
         "max_grad_norm": exp_cfg["max_grad_norm"],
+        "sigma_calibration": exp_cfg.get("sigma_calibration", "analitica"),
     })
 
     agg = FedAvgAggregator({"min_participants": len(cluster_ids)})
@@ -1318,6 +1400,15 @@ def run_fl_rounds(
     mlplane.wire(*trainers.values(), gm, agg)
 
     results: dict[int, dict[str, Any]] = {}
+
+    # Pesi di aggregazione pubblici e loss non trasmessa nelle celle con DP
+    # (2026-10-16, Segnalazioni R voce 75). I pesi sono le numerosita' dei
+    # client fissate all'inizio e dichiarate come parametro pubblico: non
+    # cambiano round per round con i dati. La loss locale non va al server nelle
+    # celle con DP (sarebbe un canale non protetto); la media riportata nel JSON
+    # e' calcolata dalla simulazione con gli stessi pesi.
+    _cella_dp = (not no_dp) or _record_dp_on(ml_cfg) or _sdp["enabled"]
+    _pesi_pubblici = {cid: len(cluster_sessions[cid]) for cid in cluster_ids}
 
     # ── Byzantine attack config ────────────────────────────────────────────────
     # Legge la sezione byzantine_attack dal config. Se assente o disabled, nessun attacco.
@@ -1363,6 +1454,7 @@ def run_fl_rounds(
     for round_num in range(1, fl_rounds + 1):
         logger.info(f"=== FL Round {round_num}/{fl_rounds} ===")
         _delta_norms: dict[str, float] = {}
+        _loss_locali: dict[str, float | None] = {}
         # Attaccante che riscala l'update (2026-10-09, Sprint 10zz+170): modello
         # ricevuto da ogni client a inizio round, riferimento di
         # ref + s*(update osservato - ref) in run_lira(). Solo in memoria, non
@@ -1386,6 +1478,15 @@ def run_fl_rounds(
             # DP per soggetto: il numero di soggetti usato dal trainer deve
             # coincidere con quello dell'accountant, altrimenti l'epsilon nel
             # JSON non corrisponde a quello che e' stato eseguito.
+            # DP per record (2026-10-16): stesso controllo sul numero di record,
+            # che l'accountant prende da len(cluster_sessions[cid]).
+            if trainer.record_dp_enabled and trainer.record_dp_last is not None:
+                if trainer.record_dp_last["n"] != len(cluster_sessions[cid]):
+                    raise RuntimeError(
+                        f"[RECORD-DP] {cid}: il trainer usa {trainer.record_dp_last['n']} "
+                        f"record, l'accountant {len(cluster_sessions[cid])}. Epsilon non "
+                        "affidabile: run fermata."
+                    )
             if _sdp["enabled"] and trainer.subject_dp_last is not None:
                 _n_tr = trainer.subject_dp_last["n_soggetti"]
                 _n_acc = _sstats_attese["per_client_subjects"].get(cid)
@@ -1496,6 +1597,10 @@ def run_fl_rounds(
                     gm, update, _dp_ablation,
                     weight_keys=weight_keys, reference_weights=pre_round_weights,
                 )
+            _loss_locali[cid] = trainer.ultima_loss_locale
+            if _cella_dp:
+                private_update.loss = None
+                private_update.n_samples = _pesi_pubblici[cid]
             agg.collect(private_update)
             # Nota (2026-07-22): idem — `private_update` è già stato emesso da
             # gm.privatize()/clip_only() (o è l'update raw stesso, se no_dp)
@@ -1574,6 +1679,15 @@ def run_fl_rounds(
                 round_num=round_num,
             ))
 
+        if _cella_dp:
+            # sostituzione con pesi fissi: tutti i client devono partecipare
+            if (aggregated.n_participants or 0) != len(cluster_ids):
+                raise RuntimeError(
+                    f"round {round_num}: {aggregated.n_participants} client su {len(cluster_ids)} "
+                    "nell'aggregato; la garanzia dichiarata presuppone che partecipino tutti")
+            _lp = [(l, _pesi_pubblici[c]) for c, l in _loss_locali.items() if l is not None]
+            aggregated.mean_loss = (sum(l * w for l, w in _lp) / sum(w for _, w in _lp)) if _lp else None
+
         # Distribuisci modello globale ai trainer
         for trainer in trainers.values():
             trainer.apply_global_model(aggregated)
@@ -1605,6 +1719,7 @@ def run_fl_rounds(
             "global_weights":    aggregated.global_weights,
             # Sprint 10zz+170: vedi _pre_round_per_client sopra.
             "pre_round_weights_per_client": _pre_round_per_client,
+            "pesi_aggregazione_pubblici": dict(_pesi_pubblici) if _cella_dp else None,
         }
 
     return results
@@ -3706,6 +3821,7 @@ def run_lira(
         "epsilon":       exp_cfg.get("epsilon", 1.0),
         "delta":         exp_cfg.get("delta", 1e-5),
         "max_grad_norm": exp_cfg.get("max_grad_norm", 1.0),
+        "sigma_calibration": exp_cfg.get("sigma_calibration", "analitica"),
     })
 
     # ── Step 1: Reconstruct per-cluster membership — must match run_fl_rounds() ─
@@ -3971,6 +4087,7 @@ def run_lira(
     _CLUSTER_SEED_OFFSET = 104729
     shadow_in_idx_sets_per_cluster: dict[str, list[set[int]]] = {}
     shadow_tensors_per_cluster: dict[str, list[torch.Tensor | None]] = {}
+    shadow_sessions_per_cluster: dict[str, list[list[dict[str, Any]]]] = {}
     # Sprint 10zz (2026-09-01), attivo solo se capture_shadow_weights=True:
     # per ogni shadow, "è la maggioranza del suo subset IN composta da membri
     # reali (cluster_members) o da non-membri (cluster_holdout)?" — usato da
@@ -4014,6 +4131,7 @@ def run_lira(
         _member_id_set = {id(s) for s in cluster_members[cid]}
         cluster_in_idx_sets: list[set[int]] = []
         cluster_tensors: list[torch.Tensor | None] = []
+        cluster_shadow_sessions: list[list[dict[str, Any]]] = []
         cluster_in_majority_member: list[bool] = []
 
         for shadow_idx in range(n_shadow):
@@ -4053,6 +4171,7 @@ def run_lira(
                 len(in_ids & _member_id_set) > len(in_ids) / 2
             )
 
+            cluster_shadow_sessions.append(in_sessions_sampled)
             shadow_tensor = _build_tensor(in_sessions_sampled)
             if shadow_tensor is None or len(shadow_tensor) < batch_size:
                 logger.warning(
@@ -4063,7 +4182,28 @@ def run_lira(
 
         shadow_in_idx_sets_per_cluster[cid] = cluster_in_idx_sets
         shadow_tensors_per_cluster[cid]     = cluster_tensors
+        shadow_sessions_per_cluster[cid]    = cluster_shadow_sessions
         shadow_in_majority_member_per_cluster[cid] = cluster_in_majority_member
+
+    # Fix 2026-10-16: con DP per record o per soggetto gli shadow si allenano con
+    # AutoencoderTrainer.train_local (stesso meccanismo del client reale, vedi il
+    # ciclo per round qui sotto). Senza queste due DP il ciclo storico resta
+    # invariato, quindi le run gia' prodotte (senza DP e con DP per client) non
+    # cambiano. I pesi dei soggetti si calcolano come in run_fl_rounds(), sulle
+    # sessioni dei client reali (cluster_members ricostruisce la stessa partizione).
+    _shadow_rdp_on = _record_dp_on(ml_cfg)
+    _shadow_sdp = _subject_dp_config(ml_cfg)
+    _shadow_via_trainer = _shadow_rdp_on or bool(_shadow_sdp["enabled"])
+    _shadow_subject_weights: dict[str, dict[str, float]] | None = None
+    if _shadow_sdp["enabled"]:
+        _shadow_subject_weights = _subject_cross_client_weights(
+            cluster_members, str(_shadow_sdp["subject_key"]), list(_mia_feature_names(cfg))
+        )
+    if _shadow_via_trainer:
+        logger.info(
+            "LiRA: shadow allenati con AutoencoderTrainer.train_local "
+            f"(record_dp={_shadow_rdp_on}, subject_dp={bool(_shadow_sdp['enabled'])})"
+        )
 
     # ── Step 3 & 4: per round, riaddestra gli shadow (warm-start) e valuta i client ─
     lira_results: dict[int, dict[str, Any]] = {}
@@ -4213,25 +4353,60 @@ def run_lira(
                     w.detach().clone() for w in shadow_model.state_dict().values()
                 ]
 
-                shadow_opt  = torch.optim.Adam(shadow_model.parameters(), lr=lr)
-                shadow_crit = torch.nn.MSELoss()
-                shadow_ds  = torch.utils.data.TensorDataset(shadow_tensor)
-                shadow_gen = torch.Generator()
-                shadow_gen.manual_seed(_s)
-                shadow_loader = torch.utils.data.DataLoader(
-                    shadow_ds, batch_size=batch_size, shuffle=True,
-                    drop_last=True, generator=shadow_gen,
-                )
+                if _shadow_via_trainer:
+                    # Fix 2026-10-16 (review del codice per soggetto e RMIA):
+                    # con la DP per record o per soggetto lo shadow si allena con
+                    # lo STESSO percorso del client reale (AutoencoderTrainer.
+                    # train_local), cioe' con lo stesso meccanismo: DP-SGD per
+                    # record, oppure campionamento di Poisson dei soggetti, taglio
+                    # per soggetto a C*w e rumore sigma*C. Prima lo shadow usava
+                    # il ciclo Adam senza DP qui sotto, e la calibrazione IN/OUT
+                    # di LiRA e RMIA confrontava un bersaglio con DP con shadow
+                    # senza DP. Seed proprio dello shadow (_s), quindi
+                    # campionamento e rumore indipendenti da quelli del bersaglio.
+                    # Pesi dei soggetti: quelli del client reale `cid` (soggetti
+                    # presenti in piu' client); i soggetti fuori dai client reali
+                    # hanno peso 1. Anche il termine FedProx segue il client reale:
+                    # ancorato al modello globale dal round 2, assente al round 1.
+                    _shadow_trainer = AutoencoderTrainer(
+                        config={**ml_cfg, "seed": _s, "epochs": shadow_epochs},
+                        node_id=f"shadow-{cid}-{shadow_idx}",
+                        cluster_id=cid,
+                    )
+                    _shadow_trainer.set_weights(_shadow_pretrain_weights)
+                    if _warm_start is None:
+                        _shadow_trainer._global_weights = None
+                    if _shadow_subject_weights is not None:
+                        _shadow_trainer.set_subject_weights(_shadow_subject_weights.get(cid, {}))
+                    _shadow_upd = _shadow_trainer.train_local(
+                        shadow_sessions_per_cluster[cid][shadow_idx], round_num
+                    )
+                    if not _load_weights_into(shadow_model, _shadow_upd.weights):
+                        raise RuntimeError(
+                            f"LiRA[{cid}] shadow {shadow_idx}: pesi del trainer "
+                            "incompatibili con l'architettura dello shadow"
+                        )
+                    shadow_model.eval()
+                else:
+                    shadow_opt  = torch.optim.Adam(shadow_model.parameters(), lr=lr)
+                    shadow_crit = torch.nn.MSELoss()
+                    shadow_ds  = torch.utils.data.TensorDataset(shadow_tensor)
+                    shadow_gen = torch.Generator()
+                    shadow_gen.manual_seed(_s)
+                    shadow_loader = torch.utils.data.DataLoader(
+                        shadow_ds, batch_size=batch_size, shuffle=True,
+                        drop_last=True, generator=shadow_gen,
+                    )
 
-                shadow_model.train()
-                for _ in range(shadow_epochs):
-                    for (batch,) in shadow_loader:
-                        shadow_opt.zero_grad()
-                        recon = shadow_model(batch)
-                        loss  = shadow_crit(recon, batch)
-                        loss.backward()
-                        shadow_opt.step()
-                shadow_model.eval()
+                    shadow_model.train()
+                    for _ in range(shadow_epochs):
+                        for (batch,) in shadow_loader:
+                            shadow_opt.zero_grad()
+                            recon = shadow_model(batch)
+                            loss  = shadow_crit(recon, batch)
+                            loss.backward()
+                            shadow_opt.step()
+                    shadow_model.eval()
 
                 # Fix 2026-07-21c: privatizza lo shadow ESATTAMENTE come un client
                 # reale, cosi' la calibrazione IN/OUT riflette il vero effetto della
@@ -6775,7 +6950,7 @@ def run_ids(
     logger.info(
         "[AUDITOR] epsilon=%s explosion_threshold=%s (record_dp=%s, subject_dp=%s, no_dp=%s)",
         _auditor_epsilon, _explosion_thresh,
-        bool(((cfg.get("ml", {}) or {}).get("record_dp") or {}).get("enabled")),
+        _record_dp_on(cfg.get("ml", {}) or {}),
         _sdp_cfg["enabled"], no_dp,
     )
     auditor = PrivacyAuditor(
@@ -7108,6 +7283,18 @@ def save_results(
             # aveva modifiche non committate al momento del run, nel qual caso
             # il solo hash NON identifica il codice eseguito.
             "git_commit": _git_commit_corrente(),
+            # 2026-10-16 (revisione profonda): tutto cio' che cambia i numeri
+            "torch_threads": cfg["experiment"].get("torch_threads"),
+            "lira_workers": cfg["experiment"].get("lira_workers"),
+            "lira": {k: (cfg.get("lira") or {}).get(k) for k in
+                     ("version", "n_shadow_eseguiti", "shadow_epochs_cap", "in_size",
+                      "observation_surface", "rmia_gamma", "rmia_population_fraction")},
+            "normalizzazione": (cfg.get("ml") or {}).get("normalization_applicata"),
+            "sigma_calibration": cfg["experiment"].get("sigma_calibration", "analitica"),
+            "riserva_profili": cfg["experiment"].get("riserva_profili", 0.3),
+            "pesi_aggregazione_pubblici": next(
+                ((fl_results or {}).get(r, {}).get("pesi_aggregazione_pubblici")
+                 for r in sorted(k for k in (fl_results or {}) if isinstance(k, int) and k > 0)), None),
             # epsilon_cumulative_naive (2026-07-22, review indipendente pre-push):
             # PRIMA di questo fix, solo l'epsilon NOMINALE per-round veniva
             # esportato — mai il budget cumulativo reale su tutti i round.
@@ -7150,6 +7337,13 @@ def save_results(
             # 2026-10-13: DP per soggetto. Se attiva, epsilon_subject_dp (non
             # il campo 'epsilon') e' il budget della cella.
             **_subject_dp_fields(cfg, subject_stats),
+            # 2026-10-16 (Segnalazioni R voce 78): DP per client con sigma dal
+            # meccanismo gaussiano analitico, adiacenza dichiarata, epsilon
+            # totale RDP sui round. I campi epsilon_cumulative_* sopra restano
+            # per confronto con le run vecchie.
+            **_client_dp_fields(
+                cfg, cfg["experiment"].get("dp_mode", "dp-fedavg"),
+                bool(cfg["experiment"].get("no_dp", False)), n_train_per_client),
         },
         "summary": {
             # Yeom 2018 — loss-based MIA sul modello globale (baseline debole)
@@ -7557,6 +7751,28 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--common-init", action="store_true",
+        help=(
+            "Tutti i client partono dagli stessi pesi iniziali (ml.common_init: true), "
+            "protocollo standard; campagna del 2026-10-16."
+        ),
+    )
+    parser.add_argument(
+        "--lira-workers", type=int, default=1,
+        help=(
+            "LiRA v2 (2026-10-16): processi per le traiettorie degli shadow, un "
+            "thread ciascuno. I numeri non dipendono da questo valore."
+        ),
+    )
+    parser.add_argument(
+        "--threads", type=int, default=None,
+        help=(
+            "Thread di torch nel processo principale (2026-10-16). Il numero di "
+            "thread cambia le cifre dalla quarta in poi: si scrive sempre nel JSON "
+            "(experiment.torch_threads)."
+        ),
+    )
+    parser.add_argument(
         "--n-shadow", type=int, default=None,
         help=(
             "Numero di shadow models per LiRA (override config lira.n_shadow). "
@@ -7701,6 +7917,32 @@ def main() -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+    # Thread (2026-10-16, Segnalazioni R voce 71): il numero di thread cambia le
+    # cifre dei risultati, quindi si fissa da riga di comando o si registra quello
+    # ereditato dall'ambiente.
+    if args.threads is not None:
+        torch.set_num_threads(int(args.threads))
+    if args.common_init:
+        cfg["ml"]["common_init"] = True
+    exp_cfg["torch_threads"] = torch.get_num_threads()
+    exp_cfg["lira_workers"] = int(args.lira_workers)
+    # LiRA v2 di default (2026-10-16): le opzioni diagnostiche della v1 non
+    # esistono nella v2. Errore PRIMA del FL, non dopo ore di training.
+    _lira = cfg.setdefault("lira", {})
+    _lira["version"] = int(_lira.get("version", 2))
+    _solo_v1 = [k for k, ok in (("shadow_init", _lira.get("shadow_init", "warm") == "warm"),
+                                ("floor_mode", _lira.get("floor_mode", "symmetric") == "symmetric"),
+                                ("member_scoring", _lira.get("member_scoring", "real") == "real"),
+                                ("canary_rescale", not (_lira.get("canary_rescale") or args.canary_rescale)))
+                if not ok]
+    if _lira["version"] == 2 and _solo_v1 and not ({"lira"} <= set(
+            (args.skip_attacks or "").replace(" ", "").split(","))):
+        raise ValueError(f"lira.{', lira.'.join(_solo_v1)}: opzioni della LiRA v1; "
+                         "aggiungere lira.version: 1 al config per riprodurre le run vecchie")
+    if args.n_shadow is not None:
+        _lira["n_shadow"] = int(args.n_shadow)
+    _lira["n_shadow_eseguiti"] = int(args.n_shadow if args.n_shadow is not None else _lira.get("n_shadow", 8))
+    _lira["shadow_epochs_cap"] = args.shadow_epochs_cap
     # Determinismo GPU (no overhead su CPU-only, ignorato silenziosamente se no CUDA)
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
@@ -7730,6 +7972,23 @@ def main() -> None:
         f"hold-out: {len(holdout_sessions)}"
     )
 
+    # Riserva per i profili di abitudine (2026-10-16, Segnalazioni R voce 81):
+    # una parte dei non membri, scelta a caso, si mette da parte in TUTTE le
+    # celle (cosi' l'holdout e' lo stesso fra le celle) e non entra ne' nel
+    # training ne' negli attacchi. Serve solo a stimare i profili della DP per
+    # soggetto, che devono venire da dati esterni al training.
+    _frac_riserva = float(exp_cfg.get("riserva_profili", 0.3))
+    riserva_profili: list[dict[str, Any]] = []
+    if _frac_riserva > 0:
+        _idx_h = list(range(len(holdout_sessions)))
+        random.Random(seed + 4242).shuffle(_idx_h)
+        _n_r = int(round(_frac_riserva * len(holdout_sessions)))
+        _ris = set(_idx_h[:_n_r])
+        riserva_profili = [s for i, s in enumerate(holdout_sessions) if i in _ris]
+        holdout_sessions = [s for i, s in enumerate(holdout_sessions) if i not in _ris]
+        logger.info(f"Riserva per i profili: {len(riserva_profili)} sessioni; "
+                    f"hold-out per gli attacchi: {len(holdout_sessions)}")
+
     # Canary positive control (Sprint 10vv, 2026-08-31) — no-op se
     # cfg["canary"]["enabled"] non è True (ogni config esistente/pubblicato).
     # DEVE avvenire DOPO lo split (i canary non alterano il taglio 80/20) e
@@ -7746,10 +8005,34 @@ def main() -> None:
     # training reale e tutti gli attacchi MIA usino esattamente lo stesso vettore di
     # feature nello stesso ordine. Default None → le 6 feature storiche (invariato).
     _FEATURES = _mia_feature_names(cfg)
-    feature_stats    = compute_feature_stats(train_sessions, _FEATURES)
-    train_sessions   = normalize_sessions(train_sessions,   feature_stats, _FEATURES)
-    holdout_sessions = normalize_sessions(holdout_sessions, feature_stats, _FEATURES)
+    feature_stats, _clip_norm, _info_norm = statistiche_normalizzazione(cfg, train_sessions, _FEATURES)
+    cfg.setdefault("ml", {})["normalization_applicata"] = _info_norm   # nel JSON
+    train_sessions   = normalize_sessions(train_sessions,   feature_stats, _FEATURES, clip=_clip_norm)
+    holdout_sessions = normalize_sessions(holdout_sessions, feature_stats, _FEATURES, clip=_clip_norm)
+    riserva_profili  = normalize_sessions(riserva_profili, feature_stats, _FEATURES, clip=_clip_norm)
     logger.info(f"Feature normalizzate [0,1]: {list(feature_stats.keys())}")
+
+    # Soggetti dalle abitudini per le sessioni senza chiave (2026-10-16).
+    _sdp_main = _subject_dp_config(cfg.get("ml", {}))
+    if _sdp_main["enabled"] and _sdp_main["senza_chiave"] == "profili":
+        from ml.profili_abitudini import addestra as _addestra_profili, assegna as _assegna_profili
+        if not riserva_profili:
+            raise ValueError("DP per soggetto con profili: experiment.riserva_profili deve essere > 0")
+        if not _clip_norm:
+            raise ValueError("profili di abitudine con normalizzazione minmax_training: il soggetto "
+                             "dipenderebbe dal training; usare i limiti pubblici")
+        _pp = _sdp_main.get("profili") or {}
+        _n_sito: dict[str, int] = {}
+        for _s in train_sessions:
+            _n_sito[str(_s.get("site_id") or "")] = _n_sito.get(str(_s.get("site_id") or ""), 0) + 1
+        _modello_profili = _addestra_profili(
+            riserva_profili, dimensione_media=float(_pp.get("dimensione_media", 10.0)),
+            peso_gruppo=float(_pp.get("peso_gruppo", 1.0)), seed=seed, fonte="riserva dell'holdout",
+            n_training_per_sito=_n_sito)
+        _assegna_profili(_modello_profili, train_sessions + holdout_sessions)
+        cfg["ml"]["subject_dp"] = {**(cfg["ml"].get("subject_dp") or {}),
+                                   "profili_applicati": _modello_profili.descrizione()}
+        logger.info(f"[SUBJECT-DP] profili di abitudine: {_modello_profili.descrizione()}")
     if args.dry_run:
         logger.info("Dry run completato — uscita.")
         return
@@ -7914,6 +8197,8 @@ def main() -> None:
             # Sprint 10zz+32 (task #57): stesso meccanismo — passato a tutti
             # gli attacchi registrati, letto solo da LiRAAttack.run().
             raw_loss_dump_path=args.raw_loss_dump,
+            # 2026-10-16: processi per gli shadow di LiRA v2.
+            lira_workers=args.lira_workers,
         )
 
     ids_results: dict = {}
