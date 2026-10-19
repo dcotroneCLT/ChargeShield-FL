@@ -2546,3 +2546,31 @@ JPL 8,0, Office 1 55,8; sigma = 2 3,4 / 3,3 / 19,8; sigma = 5 1,2 / 1,2 / 6,3.
 
 **Prima del lancio.** Fermare le code in corso (codice vecchio) e installare l'aggiornamento su ogni
 macchina; le run vecchie restano in `esiti/` come prove.
+
+**Controllo aggiuntivo v2b (2026-10-18, Mac di Domenico, `coda_v2b_domenico.csv`).** Nella v2 la DP per
+soggetto con sigma = 2 lascia vedere il canary persona (AUC appaiata 0,79 / 0,77 / 0,53, p 0,001 / 0,002 /
+0,37). Non contraddice la garanzia: con 3 x 1000 epoche l'epsilon della persona canary e' circa 112
+(`scripts/epsilon_canary_persona.py`, accountant di `ml.subject_dp`, sostituzione, delta 1e-5). La
+previsione V7 ("sigma = 2: al caso") era sbagliata perche' l'epsilon non era stato calcolato prima. Celle
+nuove, 3 seed, bracci A e B: sigma 5 e 8 a 1000 epoche (epsilon circa 29 e 15,5); a 200 epoche
+riferimento senza DP, solo taglio e sigma 5 (epsilon circa 10). Config nuovi
+`experiment_canary_multisite_subject_s5/_s8.yaml` (copie di `_s2`). Il codice dei risultati v2 non cambia.
+Previsioni, scritte prima del lancio:
+- V10. 1000 epoche: AUC appaiata (client, round 3) decrescente con sigma; a sigma 8 sotto 0,7 in almeno
+  2 seed su 3, ma non necessariamente al caso (epsilon 15,5 non lo impone).
+- V11. 200 epoche, senza DP: il canary si vede ancora (AUC almeno 0,65 con p < 0,05 in almeno 2 seed su
+  3); se non si vede, le celle a 200 epoche non dicono nulla sulla DP e lo si scrive.
+- V12. 200 epoche, sigma 5 (epsilon circa 10): AUC sotto quella senza DP dello stesso seed in tutti e 3 i
+  seed.
+
+**Risultati v2b (2026-10-19, Mac di Domenico, 32 righe, 0 errori).** Epsilon dai log con
+`scripts/epsilon_canary_persona.py`: sigma = 5 a 1000 epoche 28,6-29,1; sigma = 8 a 1000 epoche 15,3-15,6;
+sigma = 5 a 200 epoche 10,1-10,2, tutti in linea con le stime. AUC appaiata sulla superficie client, round 3,
+media dei seed 42/123/456: senza DP a 200 epoche 0,87 (p < 0,001 in tutti); solo taglio a 200 epoche 0,64
+(p 0,05-0,10); sigma = 5 a 200 epoche 0,69 (p 0,001 / 0,012 / 0,19); sigma = 5 a 1000 epoche 0,74 (p 0,002-0,027);
+sigma = 8 a 1000 epoche 0,66 (p 0,015 / 0,019 / 0,20). Previsioni: V10 confermata (a 1000 epoche l'AUC cala con
+sigma; sigma = 8 sotto 0,70 in due seed su tre); V11 confermata (il canary si vede senza DP in tre seed su tre);
+V12 confermata nel confronto con il senza DP, ma il solo taglio fa gia' scendere l'AUC a circa 0,64: a 200 epoche
+il rumore non abbassa ulteriormente il segnale (intervalli sovrapposti). Conclusione provvisoria: con epsilon fra
+circa 15 e 29 la persona canary resta rilevabile in questo attacco (AUC 0,66-0,74). Solo tre seed; intervalli
+di circa +/-0,15.

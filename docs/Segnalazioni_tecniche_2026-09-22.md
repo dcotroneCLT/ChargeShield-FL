@@ -696,3 +696,16 @@ script persona e canary.
 89. **Con IN della taglia del client gli shadow OUT per campione sono pochi**: universo membri +
     non membri, quota IN circa 0,85; con 8 shadow il 28% dei campioni non ha shadow OUT e non si
     valuta, con 32 circa lo 0,5%. Da fissare `lira.n_shadow: 32`.
+
+## T. Controlli della campagna v2b (2026-10-19)
+
+90. **Avviso fuorviante con la DP per soggetto** (`scripts/run_experiments.py`, avviso di avvio; `scripts/canary_persona.py`
+    con `no_dp=True`): con `subject_dp` attiva compare "Rumore Differential Privacy DISABILITATO (sigma=0)". La riga
+    `[SUBJECT-DP] ... sigma=5.0` mostra che il rumore e' attivo. Nessun effetto sui numeri; va corretto il testo
+    dell'avviso.
+91. **Raccolta dei risultati canary**: nella copia del raccoglitore del Mac di Domenico `canary_persona.csv` non e' stato
+    scritto. Con la versione corrente di `raccogli_risultati.py` lo stesso zip produce il file (45 righe). Da
+    riverificare sul Mac di Domenico con la copia aggiornata.
+92. **Pacchetto senza dati**: `aggiornamento_v2b` non contiene `datasets/`; ogni run fallisce dopo circa 36 secondi con
+    `FileNotFoundError: Nessun dataset trovato`. Da indicare nel LEGGIMI del pacchetto (copiare `datasets/acn`).
+

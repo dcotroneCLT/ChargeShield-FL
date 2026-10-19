@@ -197,7 +197,25 @@ def costruisci(w_mac: int, w_dom: int, w_win: int) -> list[Coda]:
                     seed, dopo="test_codice")
         for braccio, cfg in (("A", "experiment_canary_multisite_iid"), ("B", "experiment_canary_multisite_swap_iid")):
             win.run(f"v2_canary{braccio}_iid_nodp_s{seed}", 3, 55, 4, cfg, "--no-dp", seed, dopo="test_codice")
-    return [mac, dom, win]
+    # ── Mac di Domenico, controllo aggiuntivo v2b (2026-10-18). Nella v2 la DP per soggetto con
+    #    sigma = 2 lascia vedere il canary persona (AUC 0,77-0,79 in 2 seed su 3), ma in quella
+    #    configurazione (3 x 1000 epoche) l'epsilon della persona e' circa 112: nessuna garanzia utile.
+    #    Qui: sigma 5 e 8 a 1000 epoche (epsilon circa 29 e 15,5) e, a 200 epoche, riferimento senza
+    #    DP, solo taglio e sigma 5 (epsilon circa 10). Ultima riga: epsilon dai log.
+    dom2 = Coda("coda_v2b_domenico.csv", w_dom)
+    EPS = ("{PY} scripts/epsilon_canary_persona.py --log {ESITI}/../log --esiti {ESITI}/canary_persona "
+           "--out {ESITI}/../risultati/epsilon_canary_persona.csv")
+    dom2.cmd("v2b_verifica", 0, 0.05, 1, EPS)
+    for seed in SEEDS3:
+        for braccio, epoche, ore in (("gn", 200, 0.2), ("subject_s0", 200, 0.07), ("subject_s5", 200, 0.07),
+                                     ("subject_s5", 1000, 0.3), ("subject_s8", 1000, 0.3)):
+            for b in ("A", "B"):
+                dom2.cmd(f"v2b_cps_{braccio}_e{epoche}_{b}_s{seed}", 1, ore, 3,
+                         f"{CPS} --config config/experiment_canary_multisite_{braccio}.yaml "
+                         f"--etichetta indotto_{braccio} --copie 30 --spostamento 0.5 --braccio {b} "
+                         f"--seed {seed} --epochs {epoche}", dopo="v2b_verifica")
+    dom2.cmd("v2b_epsilon_persona", 9, 0.05, 1, EPS, dopo="v2b_verifica")
+    return [mac, dom, win, dom2]
 
 
 def main() -> None:
