@@ -63,6 +63,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import random
 import sys
@@ -166,17 +167,35 @@ def auc_ci_perm(lab, sc, n_boot=1000, n_perm=1000, seed=0) -> dict:
         i = rng.integers(0, len(lab), len(lab))
         if len(set(lab[i])) == 2:
             bs.append(auc(lab[i], sc[i]))
-    perm = np.array([auc(rng.permutation(lab), sc) for _ in range(n_perm)])
-    p = float((np.sum(np.abs(perm - 0.5) >= abs(a - 0.5)) + 1) / (n_perm + 1))
+    # p unilaterale (i membri ricostruiti meglio), Mann-Whitney: stesso test
+    # di mia_persona, senza il minimo 1/(n+1) di una permutazione finita
+    p = mp._p_auc(lab, sc)
     return {"auc": a, "ci95": [float(np.percentile(bs, 2.5)), float(np.percentile(bs, 97.5))],
-            "p_permutazione": p}
+            "p": p, "test": "Mann-Whitney unilaterale"}
 
 
-def combina(fa: Path, fb: Path, out: Path) -> dict:
-    """AUC appaiata e somma A+B, per round, dalle perdite per utente dei due bracci."""
+class BracciIncoerenti(ValueError):
+    """I due file non sono i bracci A e B dello stesso esperimento."""
+
+
+def combina(fa: Path, fb: Path, out: Path, spostamento: float | None = None) -> dict:
+    """AUC appaiata e somma A+B, per round, dalle perdite per utente dei due bracci.
+
+    2026-10-16 (Segnalazioni R voce 83): prima di combinare si controlla che i
+    file siano davvero il braccio A e il braccio B dello stesso esperimento
+    (stessi parametri, stesso config, stessi round), altrimenti errore."""
     A, B = json.loads(fa.read_text()), json.loads(fb.read_text())
-    for chiave in ("seed", "copie", "config", "g1", "g2", "sito", "divisione", "spostamento"):
-        assert A.get(chiave) == B.get(chiave), f"i due bracci differiscono in {chiave}"
+    if A.get("braccio") != "A" or B.get("braccio") != "B":
+        raise BracciIncoerenti(f"bracci {A.get('braccio')!r} e {B.get('braccio')!r} invece di 'A' e 'B'")
+    for chiave in ("seed", "copie", "config", "config_sha", "g1", "g2", "sito", "divisione",
+                   "spostamento", "rounds", "epochs", "sessioni_training", "sessioni_fresche",
+                   "feature", "utenti_idonei"):
+        if A.get(chiave) != B.get(chiave):
+            raise BracciIncoerenti(f"i due bracci differiscono in {chiave}")
+    if spostamento is not None and float(A.get("spostamento", 0.0)) != float(spostamento):
+        raise BracciIncoerenti(f"spostamento nei file {A.get('spostamento')} invece di {spostamento}")
+    if set(A["perdite_per_round"]) != set(B["perdite_per_round"]):
+        raise BracciIncoerenti("i due bracci hanno round diversi")
     utenti = A["g1"] + A["g2"]
     lab = [1] * len(A["g1"]) + [0] * len(A["g2"])
     ris: dict[str, Any] = {k: A.get(k) for k in ("seed", "copie", "spostamento", "config", "sito", "divisione",
@@ -194,6 +213,20 @@ def combina(fa: Path, fb: Path, out: Path) -> dict:
                 riga[f"{sup}_{parte}_auc_A"] = aa
                 riga[f"{sup}_{parte}_auc_B"] = ab
         ris["per_round"][r] = riga
+    # confronti multipli (2026-10-16, Segnalazioni R voce 84): metrica primaria
+    # dichiarata prima dei numeri (ultimo round, superficie client, sessioni di
+    # training); p corretti con Holm su tutte le appaiate della combinazione
+    ultimo = max(ris["per_round"], key=int)
+    ris["metrica_primaria"] = f"per_round[{ultimo}].client_training_appaiata"
+    prim = f"{ultimo}.client_training_appaiata"
+    pv = {f"{r}.{k}": v["p"] for r, riga in ris["per_round"].items()
+          for k, v in riga.items() if k.endswith("_appaiata")}
+    holm = mp._holm({k: v for k, v in pv.items() if k != prim})   # solo le secondarie
+    holm[prim] = pv[prim]
+    for r, riga in ris["per_round"].items():
+        for k, v in riga.items():
+            if k.endswith("_appaiata"):
+                v["p_holm"] = holm[f"{r}.{k}"]
     out.write_text(json.dumps(ris, indent=2))
     return ris
 
@@ -217,19 +250,23 @@ def main() -> None:
     ap.add_argument("--out", default=str(ROOT / "risultati/canary_persona"))
     ap.add_argument("--etichetta", default=None, help="nome del regime nei file (default: nome del config)")
     ap.add_argument("--combina", action="store_true", help="solo il file appaiato dai due bracci gia' fatti")
+    ap.add_argument("--combina-se-pronto", action="store_true",
+                    help="a fine run combina con l'altro braccio se esiste (default: no)")
     a = ap.parse_args()
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     tag = a.etichetta or Path(a.config).stem
     sp = f"_d{a.spostamento:g}" if a.spostamento > 0 else ""
-    nome = lambda b: out / f"canary_persona_{tag}_c{a.copie}{sp}_{b}_s{a.seed}.json"  # noqa: E731
+    cfg = rx.load_config(Path(a.config), {"rounds": a.rounds, "epochs": a.epochs})
+    # round ed epoche nel nome: una run con parametri diversi non sovrascrive
+    rr, ee = cfg["experiment"]["fl_rounds"], cfg["ml"]["epochs"]
+    nome = lambda b: out / f"canary_persona_{tag}_c{a.copie}{sp}_r{rr}_e{ee}_{b}_s{a.seed}.json"  # noqa: E731
     if a.combina:
-        r = combina(nome("A"), nome("B"), nome("AB"))
+        r = combina(nome("A"), nome("B"), nome("AB"), spostamento=a.spostamento)
         print(json.dumps(r["per_round"][max(r["per_round"], key=int)], indent=2))
         return
 
     t0 = time.time()
-    cfg = rx.load_config(Path(a.config), {"rounds": a.rounds, "epochs": a.epochs})
     cfg["experiment"]["seed"] = a.seed
     cfg.setdefault("canary", {})["enabled"] = False  # il canary per sessione non c'entra
     mp._semina(a.seed)
@@ -237,12 +274,31 @@ def main() -> None:
     pool = costruisci_pool(sessions, a.sito, a.utenti, a.min_sessioni, a.sessioni_training,
                            a.sessioni_fresche, a.seed, a.divisione)
     feats = rx._mia_feature_names(cfg)
-    # normalizzazione uguale nei due bracci: sfondo + parti di training di tutto il pool
-    base_stats = [sessions[i] for i in pool["sfondo"]] + [
-        sessions[i] for u in pool["parti"] for i in pool["parti"][u]["training"]]
-    stats = rx.compute_feature_stats(base_stats, feats)
-    sessions_n = rx.normalize_sessions(sessions, stats, feats)
+    # normalizzazione con limiti pubblici, uguale nei due bracci (2026-10-16)
+    stats, clip, info_norm = rx.statistiche_normalizzazione(cfg, [], feats)
+    sessions_n = rx.normalize_sessions(sessions, stats, feats, clip=clip)
     sessions_n = applica_spostamento(sessions_n, pool, feats, a.spostamento, a.seed)
+    # DP per soggetto con profili: riserva di sessioni di sfondo senza userID,
+    # fuori dal training di entrambi i bracci, per stimare i profili
+    profili = None
+    sdp = rx._subject_dp_config(cfg["ml"])
+    if sdp["enabled"] and sdp["senza_chiave"] == "profili":
+        from ml.profili_abitudini import addestra, assegna
+        senza = [i for i in pool["sfondo"] if sessions[i].get("user_id") in (None, "")]
+        random.Random(a.seed + 4242).shuffle(senza)
+        ris = set(senza[:int(round(0.3 * len(senza)))])
+        pool["sfondo"] = [i for i in pool["sfondo"] if i not in ris]
+        pp = sdp.get("profili") or {}
+        n_sito: dict[str, int] = {}
+        for i in pool["sfondo"]:          # uguale nei due bracci
+            k_s = str(sessions_n[i].get("site_id") or "")
+            n_sito[k_s] = n_sito.get(k_s, 0) + 1
+        mod = addestra([sessions_n[i] for i in sorted(ris)],
+                       dimensione_media=float(pp.get("dimensione_media", 10.0)),
+                       peso_gruppo=float(pp.get("peso_gruppo", 1.0)), seed=a.seed,
+                       fonte="riserva dello sfondo", n_training_per_sito=n_sito)
+        assegna(mod, sessions_n)
+        profili = mod.descrizione()
     train = training_del_braccio(sessions_n, pool, a.braccio, a.copie)
 
     mp._semina(a.seed)
@@ -278,6 +334,8 @@ def main() -> None:
     sfondo_per_sito = Counter(sito_di(sessions[i]) for i in pool["sfondo"])
     esito = {
         "seed": a.seed, "braccio": a.braccio, "copie": a.copie, "config": Path(a.config).name,
+        "config_sha": hashlib.sha256(json.dumps(cfg, sort_keys=True, default=str).encode()).hexdigest()[:16],
+        "commit": mp._commit(), "normalizzazione": info_norm, "profili": profili,
         "sito": a.sito, "divisione": a.divisione, "spostamento": a.spostamento, "rounds": cfg["experiment"]["fl_rounds"],
         "epochs": cfg["ml"]["epochs"], "feature": feats,
         "sessioni_training": a.sessioni_training, "sessioni_fresche": a.sessioni_fresche,
@@ -295,8 +353,8 @@ def main() -> None:
           + ", ".join(f"{sup} {parte} {aucs[ultimo][sup][parte]:.3f}" for sup in SUPERFICI
                       for parte in ("training", "fresche")) + f" -> {f}")
     altro = nome("B" if a.braccio == "A" else "A")
-    if altro.exists():
-        r = combina(nome("A"), nome("B"), nome("AB"))
+    if a.combina_se_pronto and altro.exists():
+        r = combina(nome("A"), nome("B"), nome("AB"), spostamento=a.spostamento)
         print("appaiato (ultimo round):", json.dumps(r["per_round"][max(r["per_round"], key=int)], indent=2))
 
 

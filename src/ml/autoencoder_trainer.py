@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import zlib
 from typing import Any
 
@@ -18,7 +19,7 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset
 
 from core.autoencoder import Autoencoder
-from ml.subject_dp import row_valid, sampling_schedule, subject_dp_config, subject_ids
+from ml.subject_dp import record_dp_on, row_valid, sampling_schedule, subject_dp_config, subject_ids
 from ml.base_ml import (
     AbstractMLModel,
     AggregatedUpdate,
@@ -106,7 +107,7 @@ class AutoencoderTrainer(AbstractMLModel):
         # sperimentale ("il clipping per-record sopprime il segnale canary?"),
         # non come claim di garanzia formale.
         _rdp = config.get("record_dp") or {}
-        self.record_dp_enabled: bool = bool(_rdp.get("enabled", False))
+        self.record_dp_enabled: bool = record_dp_on(config)  # lettura stretta (2026-10-16)
         self.record_dp_max_grad_norm: float = float(_rdp.get("max_grad_norm", 1.0))
         self.record_dp_noise_multiplier: float = float(_rdp.get("noise_multiplier", 0.0))
         if self.record_dp_enabled and self.record_dp_max_grad_norm <= 0.0:
@@ -142,6 +143,11 @@ class AutoencoderTrainer(AbstractMLModel):
         # impostati da run_fl_rounds() con set_subject_weights(). Assente => 1.
         self._subject_weights: dict[str, float] = {}
         self.subject_dp_last: dict[str, Any] | None = None
+        # Celle con DP (2026-10-16): la loss locale resta nel client, non va
+        # nell'update che esce (e nemmeno negli eventi del ML Plane).
+        self.trasmetti_loss: bool = bool(config.get("trasmetti_loss", True))
+        self.ultima_loss_locale: float | None = None
+        self.record_dp_last: dict[str, Any] | None = None
 
         # Seed per DataLoader shuffle deterministico (riproducibilità DSN 2027)
         self._seed: int = config.get("seed", 42)
@@ -172,7 +178,10 @@ class AutoencoderTrainer(AbstractMLModel):
         # lo specifica, forziamo "group" ed emettiamo un warning: e' preferibile
         # a un crash a meta' del primo round o, peggio, a una garanzia DP
         # silenziosamente invalida.
-        _norm = str(config.get("norm", "batch"))
+        # Default "group" dal 2026-10-16 (Segnalazioni R voce 74, decisione della
+        # dottoranda: GroupNorm in tutte le celle). Le run precedenti usavano
+        # "batch" senza dichiararlo: per riprodurle serve norm: batch nel config.
+        _norm = str(config.get("norm", "group"))
         if self.record_dp_enabled and _norm != "group":
             logger.warning(
                 "[RECORD-DP] norm=%r incompatibile con il clipping per-esempio: "
@@ -314,7 +323,10 @@ class AutoencoderTrainer(AbstractMLModel):
             norma = torch.sqrt(
                 sum((p.grad.detach() ** 2).sum() for p in params if p.grad is not None)
             )
-            scala = min(1.0, C / float(norma.item() + 1e-12))
+            _n = float(norma.item())
+            if not math.isfinite(_n):      # 2026-10-16: min(1, nan) = 1 non taglierebbe
+                raise RuntimeError("norma del gradiente per esempio non finita")
+            scala = min(1.0, C / (_n + 1e-12))
             for acc, p in zip(somma, params):
                 if p.grad is not None:
                     acc.add_(p.grad.detach() * scala)
@@ -345,6 +357,105 @@ class AutoencoderTrainer(AbstractMLModel):
 
         self.optimizer.step()
         return loss_totale / n
+
+    # ── DP per record con campionamento di Poisson (2026-10-16) ────────────────
+    #
+    # Segnalazioni R voce 77: con lo shuffle a batch fissi l'epsilon di Poisson
+    # dell'accountant non e' una garanzia. Da qui ogni passo estrae ogni record
+    # con probabilita' q = B/n (lotto di dimensione variabile, anche vuoto),
+    # passi per epoca = floor(n/B), esattamente i parametri di
+    # src/ml/record_dp_accounting.py. Gradienti per esempio con torch.func.vmap
+    # (stesse somme del ciclo a 1e-8, circa 7 volte piu' veloce); il ciclo resta
+    # in _record_dp_clipped_sum_loop come riferimento dei test.
+
+    def _record_dp_clipped_sum_loop(self, batch: torch.Tensor) -> tuple[list[torch.Tensor], list[float]]:
+        """Somma dei gradienti per esempio tagliati a C, un esempio alla volta."""
+        params = [p for p in self.model.parameters() if p.requires_grad]
+        somma = [torch.zeros_like(p) for p in params]
+        losses: list[float] = []
+        C = self.record_dp_max_grad_norm
+        for i in range(batch.shape[0]):
+            self.optimizer.zero_grad(set_to_none=True)
+            x = batch[i : i + 1]
+            loss_i = self.criterion(self.model(x), x)
+            loss_i.backward()
+            losses.append(float(loss_i.item()))
+            norma = torch.sqrt(sum((p.grad.detach() ** 2).sum() for p in params if p.grad is not None))
+            _n = float(norma.item())
+            if not math.isfinite(_n):
+                raise RuntimeError("norma del gradiente per esempio non finita")
+            scala = min(1.0, C / (_n + 1e-12))
+            for acc, p in zip(somma, params):
+                if p.grad is not None:
+                    acc.add_(p.grad.detach() * scala)
+        return somma, losses
+
+    def _record_dp_clipped_sum_vmap(self, batch: torch.Tensor) -> tuple[list[torch.Tensor], list[float]]:
+        """Come _record_dp_clipped_sum_loop, con torch.func.vmap."""
+        from torch.func import functional_call, grad_and_value, vmap
+
+        nomi = [n for n, p in self.model.named_parameters() if p.requires_grad]
+        params = {n: p.detach() for n, p in self.model.named_parameters() if p.requires_grad}
+        buffers = {n: b.detach() for n, b in self.model.named_buffers()}
+        crit = self.criterion
+        modello = self.model
+
+        def _loss(pr: dict[str, torch.Tensor], x: torch.Tensor) -> torch.Tensor:
+            x = x.unsqueeze(0)
+            return crit(functional_call(modello, (pr, buffers), (x,)), x)
+
+        g, l = vmap(grad_and_value(_loss), in_dims=(None, 0))(params, batch)
+        flat = torch.cat([g[n].reshape(batch.shape[0], -1) for n in nomi], dim=1)
+        norme = torch.sqrt((flat ** 2).sum(dim=1))
+        if not bool(torch.isfinite(norme).all()):
+            raise RuntimeError("norma del gradiente per esempio non finita")
+        scala = torch.clamp(self.record_dp_max_grad_norm / (norme + 1e-12), max=1.0)
+        somma = [(g[n] * scala.view(-1, *([1] * (g[n].dim() - 1)))).sum(dim=0) for n in nomi]
+        return somma, [float(v) for v in l.detach()]
+
+    def _train_local_record_dp(self, tensor: torch.Tensor, round_num: int) -> list[float]:
+        """DP-SGD per record con campionamento di Poisson. Restituisce la loss
+        media di ogni epoca (sugli esempi estratti)."""
+        self.model.train()
+        n = int(tensor.shape[0])
+        B = int(self.batch_size)
+        if n < B:
+            logger.warning(f"[RECORD-DP] [{self.node_id}] {n} record < batch {B}: nessun passo")
+            self.record_dp_last = {"n": n, "q": None, "passi_per_epoca": 0}
+            return []
+        q = B / n
+        per_epoch = n // B
+        self.record_dp_last = {"n": n, "q": q, "passi_per_epoca": per_epoch}
+        sigma = self.record_dp_noise_multiplier
+        C = self.record_dp_max_grad_norm
+        gen = torch.Generator().manual_seed(
+            self._seed + 104729 * round_num + 7927 + zlib.crc32(self.cluster_id.encode()))
+        params = [p for p in self.model.parameters() if p.requires_grad]
+        epoch_losses: list[float] = []
+        for _epoch in range(self.epochs):
+            step_losses: list[float] = []
+            for _step in range(per_epoch):
+                scelti = (torch.rand(n, generator=gen) < q).nonzero().flatten()
+                if scelti.numel() > 0:
+                    somma, losses = self._record_dp_clipped_sum_vmap(tensor[scelti].to(self.device))
+                    step_losses.extend(losses)
+                else:
+                    somma = [torch.zeros_like(p) for p in params]
+                # il passo rumoroso si fa anche con il lotto vuoto (Poisson)
+                self.optimizer.zero_grad(set_to_none=True)
+                for idx, (acc, p) in enumerate(zip(somma, params)):
+                    g = acc
+                    if sigma > 0.0:
+                        g = g + torch.normal(mean=0.0, std=sigma * C, size=g.shape, device=g.device)
+                    g = g / float(B)                 # denominatore costante = B atteso
+                    if self.proximal_mu > 0.0 and self._global_weights is not None:
+                        if idx < len(self._global_weights):
+                            g = g + self.proximal_mu * (p.detach() - self._global_weights[idx])
+                    p.grad = g
+                self.optimizer.step()
+            if step_losses:
+                epoch_losses.append(sum(step_losses) / len(step_losses))
+        return epoch_losses
 
     # ── DP a livello di soggetto ─────────────────────────────────────────────
 
@@ -389,7 +500,10 @@ class AutoencoderTrainer(AbstractMLModel):
             norma = torch.sqrt(
                 sum((p.grad.detach() ** 2).sum() for p in params if p.grad is not None)
             )
-            scala = min(1.0, (C * float(w)) / float(norma.item() + 1e-12))
+            _n = float(norma.item())
+            if not math.isfinite(_n):      # 2026-10-16: min(1, nan) = 1 non taglierebbe
+                raise RuntimeError("norma del gradiente del soggetto non finita")
+            scala = min(1.0, (C * float(w)) / (_n + 1e-12))
             for acc, p in zip(somma, params):
                 if p.grad is not None:
                     acc.add_(p.grad.detach() * scala)
@@ -528,6 +642,9 @@ class AutoencoderTrainer(AbstractMLModel):
             # Campionamento di Poisson dei soggetti al posto del DataLoader
             # (vedi _train_local_subject_dp e src/ml/subject_dp.py).
             epoch_losses = self._train_local_subject_dp(tensor, subjects or [], round_num)
+        elif self.record_dp_enabled:
+            # Poisson sui record dal 2026-10-16 (vedi _train_local_record_dp).
+            epoch_losses = self._train_local_record_dp(tensor, round_num)
         else:
             dataset    = TensorDataset(tensor)
             # Generator con seed determinístico per riproducibilità dello shuffle tra run.
@@ -565,13 +682,14 @@ class AutoencoderTrainer(AbstractMLModel):
             )
         logger.info(f"[{self.node_id}] Round {round_num} — loss={loss_str}, n={effective_samples}")
 
+        self.ultima_loss_locale = mean_loss
         update = GradientUpdate(
             node_id=self.node_id,
             cluster_id=self.cluster_id,
             round_num=round_num,
             weights=self.get_weights(),
             gradients=None,
-            loss=mean_loss,
+            loss=mean_loss if self.trasmetti_loss else None,
             n_samples=effective_samples,
             metadata={
                 "epochs": self.epochs,
@@ -623,10 +741,14 @@ class AutoencoderTrainer(AbstractMLModel):
                     valid = False
                     break
                 try:
-                    row.append(float(val))
+                    x = float(val)
                 except (TypeError, ValueError):
                     valid = False
                     break
+                if not math.isfinite(x):   # 2026-10-16: come row_valid
+                    valid = False
+                    break
+                row.append(x)
             if valid:
                 rows.append(row)
 

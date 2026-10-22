@@ -84,7 +84,7 @@ def _braccio(path, braccio, g1, g2, perdite):
     auc = {sup: {p: roc_auc_score([lab[u] for u in g1 + g2], [-perdite[p][u] for u in g1 + g2])
                  for p in ("training", "fresche")} for sup in cp.SUPERFICI}
     path.write_text(json.dumps({
-        "seed": 1, "copie": 30, "config": "x.yaml", "g1": g1, "g2": g2, "sito": "jpl",
+        "seed": 1, "braccio": braccio, "copie": 30, "config": "x.yaml", "g1": g1, "g2": g2, "sito": "jpl",
         "divisione": "casuale", "rounds": 1, "epochs": 1, "sessioni_training": 20, "sessioni_fresche": 10,
         "perdite_per_round": {"1": {sup: perdite for sup in cp.SUPERFICI}}, "auc_per_round": {"1": auc}}))
 
@@ -104,7 +104,7 @@ def test_combina_vede_la_memorizzazione_e_toglie_la_difficolta():
         _braccio(d / "B.json", "B", g1, g2, pb)
         r = cp.combina(d / "A.json", d / "B.json", d / "AB.json")["per_round"]["1"]
         assert r["client_training_appaiata"]["auc"] == 1.0          # l'appaiata la vede tutta
-        assert r["client_training_appaiata"]["p_permutazione"] < 0.01
+        assert r["client_training_appaiata"]["p"] < 0.01
         assert r["client_training_somma_AB"] < 1.6                   # la grezza e' coperta dalla difficolta'
         # nullo: nessun effetto -> appaiata a 0.5 (differenze tutte nulle)
         pn = {p: {u: diff[u] for u in g1 + g2} for p in ("training", "fresche")}
@@ -141,3 +141,24 @@ def test_spostamento_uguale_nei_bracci_e_solo_sul_pool():
     assert cp.applica_spostamento(ss, p, ["a"], 0.0, 42) is ss
     with pytest.raises(ValueError):
         cp.applica_spostamento(ss, p, ["a"], 1.5, 42)
+
+
+def test_combina_rifiuta_bracci_incoerenti(tmp_path):
+    """2026-10-16 (Segnalazioni R voce 83): A copiato come B, round o
+    spostamento diversi devono dare errore, non un AUC 0,5 falso."""
+    g1 = [f"a{i}" for i in range(5)]
+    g2 = [f"b{i}" for i in range(5)]
+    pn = {p: {u: 1.0 for u in g1 + g2} for p in ("training", "fresche")}
+    _braccio(tmp_path / "A.json", "A", g1, g2, pn)
+    _braccio(tmp_path / "B.json", "A", g1, g2, pn)          # A copiato come B
+    with pytest.raises(cp.BracciIncoerenti):
+        cp.combina(tmp_path / "A.json", tmp_path / "B.json", tmp_path / "AB.json")
+    _braccio(tmp_path / "B.json", "B", g1, g2, pn)
+    b = json.loads((tmp_path / "B.json").read_text())
+    b["epochs"] = 999
+    (tmp_path / "B.json").write_text(json.dumps(b))
+    with pytest.raises(cp.BracciIncoerenti):
+        cp.combina(tmp_path / "A.json", tmp_path / "B.json", tmp_path / "AB.json")
+    _braccio(tmp_path / "B.json", "B", g1, g2, pn)
+    with pytest.raises(cp.BracciIncoerenti):
+        cp.combina(tmp_path / "A.json", tmp_path / "B.json", tmp_path / "AB.json", spostamento=0.5)

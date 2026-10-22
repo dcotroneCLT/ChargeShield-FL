@@ -185,13 +185,22 @@ class TestAutoencoderTrainer:
 class TestGradientManager:
 
     def test_sigma_computed(self, dp_config):
-        gm = GradientManager(dp_config)
+        # formula classica: solo con sigma_calibration "classica" (run vecchie)
+        gm = GradientManager({**dp_config, "sigma_calibration": "classica"})
         expected = (
             dp_config["max_grad_norm"]
             * math.sqrt(2 * math.log(1.25 / dp_config["delta"]))
             / dp_config["epsilon"]
         )
         assert abs(gm.sigma - expected) < 1e-6
+
+    def test_sigma_analitica_default(self, dp_config):
+        # 2026-10-16: default analitica, sostituzione (sensibilita' 2C)
+        from ml.client_dp_accounting import sigma_gaussiano_analitico
+        gm = GradientManager(dp_config)
+        expected = 2 * dp_config["max_grad_norm"] * sigma_gaussiano_analitico(
+            dp_config["epsilon"], dp_config["delta"])
+        assert abs(gm.sigma - expected) < 1e-9
 
     def test_missing_config_raises(self):
         with pytest.raises(ValueError):

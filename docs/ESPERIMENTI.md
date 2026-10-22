@@ -1,6 +1,6 @@
 # ChargeShield-FL — Esperimenti da eseguire
 
-> **Stato: documento CANONICO.** Aggiornato il 2026-09-30 (revisione: costo, E-C, controlli (a) e (b) eseguiti, griglia del punto operativo, canary su più siti, E-D con DP, campagna E-B, braccio con DP di E-E; il 2026-09-30 esito dello screening di C e del solo clipping, config e run di prova del canary su più siti). Sostituisce,
+> **Stato: documento CANONICO.** Aggiornato il 2026-10-16 (revisione profonda: correzioni di LiRA, RMIA, DP e script persona prima di nuove run di attacco, sezione in fondo); prima, il 2026-10-14 (Scozia ridotta con DP per record e per soggetto, controllo ACN a quattro feature, una run alla volta per macchina, previsioni; prima, il 2026-09-30: revisione: costo, E-C, controlli (a) e (b) eseguiti, griglia del punto operativo, canary su più siti, E-D con DP, campagna E-B, braccio con DP di E-E; il 2026-09-30 esito dello screening di C e del solo clipping, config e run di prova del canary su più siti). Sostituisce,
 > per gli esperimenti ancora da lanciare, il vecchio `TestRoadmap_DSN2027.md`, eliminato
 > il 2026-09-22 e recuperabile dalla storia git. Ogni
 > voce dice quale RQ serve, quale conclusione può cambiare, cosa deve essere vero
@@ -2009,6 +2009,7 @@ perché l'aggregato combina pochi contributi.
   authority, postcode, velocità) e popolazioni (`Population_data/`). Fonte: Strathclyde, DOI 10.15129/1f431af7-5caa-4840-a9ab-c1f3b521e033
   (confermata il 2026-10-12, `PROVENIENZA.txt` nella cartella).
 - Prerequisiti: verificare la licenza; preprocessing con le stesse feature di ACN dove esistono;
+  [superato il 2026-10-14: replica ridotta a tre council, vedi la sezione "Scozia: replica ridotta"]
   partizione decisa il 2026-10-13: prima 32 client, uno per local authority, con
   tutte le loro sessioni e nessun sottocampionamento (sottocampionare riprodurrebbe il limite di ACN); poi, se
   serve, una replica a 3 client. Config `config/experiment_scotland_32client.yaml`: 4 feature informative (le 6
@@ -2037,6 +2038,120 @@ deployment".
 
 **Macchine.** Ogni blocco seed × condizione va su una sola macchina; i confronti fra condizioni si fanno solo
 dentro la stessa macchina.
+
+## Scozia: replica ridotta e controllo ACN a quattro feature (decisione del 2026-10-14)
+
+**Decisione della dottoranda, 14 ottobre.** La Scozia si fa nella forma ridotta del documento del 12 ottobre
+("chiudere il paper DSN 2027"): tre council con la forma di ACN, sola utilità, stessa configurazione di ACN,
+tutte le celle sulla stessa macchina. In più, su richiesta della dottoranda, la DP per record e la DP per
+soggetto anche sulla Scozia. La campagna a 32 council del 13 ottobre è rinviata a dopo il paper (materiale per
+la tesi): le sue righe sono in `coda_scozia32_tesi.csv` del pacchetto offline e non si lanciano prima del
+congelamento. La coda a 32 council avviata il 14 ottobre sul Mac di Domenico va fermata; le run che ha
+prodotto non entrano in nessuna analisi.
+
+**Conteggi.** `scripts/conteggi_scozia.py` legge i file mensili con lo stesso adapter degli esperimenti e
+scrive in `risultati/scozia_conteggi/` le tabelle per council e mese (sessioni, punti di ricarica, quota del
+punto più usato, energia, durata e ora mediane, quota serale e feriale, sessioni oltre 24 ore, quota DC) e i
+totali per council con la classe urbano-rurale (UR8). Eseguito il 14 ottobre su una copia dei file del
+pacchetto offline: 3 120 427 sessioni lette, 17 383 senza council (11 978 nell'ottobre 2022).
+
+**Scelta, dentro la regola del 12 ottobre** (confermata dalla dottoranda il 14 ottobre, prima del lancio). Settembre, ottobre e novembre 2023: mesi consecutivi nel mezzo del periodo, lontani dai primi due
+mesi e da dicembre, senza crolli o picchi nei tre council. Glasgow ha un cambio di regime fra marzo e maggio
+2023 (da circa 27 000 a circa 10 000 sessioni al mese): i mesi scelti stanno dopo.
+
+| council | sessioni (training all'80%) | punti | punto più usato | profilo |
+|---|---|---|---|---|
+| Glasgow City | 31 896 (25 517) | 209 | 5.6% | urbano (UR8 1), DC 22% |
+| Dundee City | 31 706 (25 365) | 102 | 4.3% | urbano (UR8 1), DC 75% |
+| Shetland Islands | 1 701 (1 361) | 33 | 17.5% | rurale remoto (UR8 8), DC 35% |
+
+ACN: 25 200, 26 829 e 1 341. Nella run di prova lo split del codice ha dato 25 540, 25 338 e 1 364 sessioni
+di training. Deroga approvata dalla dottoranda il 14 ottobre, da riferire al supervisore (la regola e' sua): la regola
+chiede per il council piccolo da 5 a 20 punti di ricarica;
+nessun council della taglia giusta (Na h-Eileanan an Iar, Shetland, Orkney) ne ha meno di 31. Shetland
+rispetta l'altro vincolo (nessun punto oltre il 40% delle sessioni). Le sessioni oltre 24 ore (280, 194 e 26
+nei tre council) restano come sono, uguali per tutti: l'adapter le legge come stringa e non le tronca. Scelta
+e tabella sono anche in testa ai config `experiment_sc3*.yaml`.
+
+**Celle** (coda `coda_domenico.csv` del pacchetto offline, Mac di Domenico). 5 seed (42, 123, 456, 789,
+1234), 10 round, 50 epoche, quattro feature, LiRA e Shadow saltati (Yeom resta).
+- Senza DP, FedAvg e FedProx (10 run); DP per client completa a ε = 64, C = 1 (10); solo taglio e solo
+  rumore (20); μ = 0.001 e 0.1 con DP (10). Totale 50.
+- DP per record (DP-SGD, C = 1, σ = 1, FedProx, `experiment_sc3_recorddp.yaml`): ε di Poisson circa 30,
+  come σ = 1 su ACN. 5 run, ciascuna di qualche ora.
+- DP per soggetto (colonnina, σ = 5, C = 1, 8 colonnine attese per passo, FedProx,
+  `experiment_sc3_subjectdp.yaml`): ε atteso 13.9, 6.3 e 4.2 su Shetland, Dundee e Glasgow. 5 run.
+- Riferimento senza DP con la stessa normalizzazione (GroupNorm) delle due celle precedenti,
+  `experiment_sc3_groupnorm.yaml`. 5 run.
+- Prima di tutto una run di prova cronometrata (`sc3_prova_s42`: seed 42, senza DP, FedProx): le altre run
+  della Scozia partono solo dopo.
+
+**LiRA e RMIA anche sulla Scozia** (decisione della dottoranda, 14 ottobre, da riferire al supervisore: il
+documento del 12 ottobre li escludeva). Nelle quattro celle principali (senza DP e DP completa, FedAvg e
+FedProx, 5 seed) gli attacchi girano come nelle celle RQ3 di ACN (`--n-shadow 2 --shadow-epochs-cap 20`,
+Shadow saltato); righe `sc3a_*` nella coda, circa 7 ore-run in più. Ablazioni, curva in μ e celle con DP per
+record e per soggetto restano di sola utilità.
+
+**Curva di sensibilità** (decisa il 14 ottobre). Domanda: il nullo del regime naturale dipende dalla capacità
+del modello? Due assi.
+- Capacità (nuovo, Mac di Domenico, stessa macchina per tutta la curva): regime naturale di ACN, senza DP,
+  FedProx μ = 0.01, LiRA e RMIA, 5 seed; architettura del regime naturale (16, 8), latente 4, 618 parametri, e
+  `experiment_cap32_16` (1 870 parametri, 3 volte), `experiment_cap64_32` (6 294, 10 volte),
+  `experiment_cap128_64` (22 822, 37 volte). 20 run, circa 23 ore-run.
+- Intensità del segnale: il controllo positivo per persona nel regime naturale (architettura del regime
+  naturale, 1, 10 e 30 copie, due superfici), già in `coda_mac.csv` (righe `cp_naturale_*`).
+
+Precedente da tenere presente: l'escalation di agosto (Sprint 10jj-10nn: Office 1, 3 round, 1000 epoche, un
+seed) ha dato LiRA composto fra 0.48 e 0.54 anche con capacità 3.3 volte, con una feature quasi univoca e con
+un altro sito. Correzione: il modello del regime naturale ha 618 parametri; i circa 1 800 citati nel documento
+del 12 ottobre sono quelli del modello del canary ((32, 16), latente 8).
+
+Previsione per la curva di capacità, proposta dall'assistente sulla base dell'escalation di agosto, da
+confermare dalla dottoranda prima del lancio: LiRA composto e RMIA fra 0.48 e 0.54 a ogni capacità; il divario
+di loss fra membri e non membri cresce con la capacità. Lettura: se la previsione regge, il nullo non dipende
+dalla sola capacità ma da quanto le sessioni sono distinguibili fra loro; se l'AUC sale con la capacità, il
+nullo dipende dalla capacità. Previsione per LiRA e RMIA sulla Scozia: al caso, come su ACN.
+
+**Controllo ACN a quattro feature** (stessa coda, stessa macchina della Scozia). Le otto celle di RQ3 a 5
+seed, 40 run, sola utilità come la Scozia. Config `experiment_acn4f*.yaml`: cambiano solo `ml.input_dim` e
+`ml.feature_names` rispetto alle celle RQ3 di ACN; con quattro feature il modello prende la capacità
+predefinita (16, 8), latente 4, come in Scozia.
+
+**Verifiche fatte il 14 ottobre**, su una copia del codice con i dati reali, 1 round e 1 epoca: le config
+`experiment_sc3_eps64` (solo taglio), `experiment_sc3_recorddp`, `experiment_sc3_subjectdp` e
+`experiment_acn4f_eps64` caricano i dati e terminano senza errori. Servono solo a dire che le config girano,
+non dicono nulla sulle previsioni.
+
+**Macchine e protocollo.** Una run alla volta per macchina (`CLAUDE.md`; confermato dalla dottoranda il 14
+ottobre: macchine diverse possono lavorare in parallelo). `esegui_coda.py` lancia ora una run alla volta
+(`--max-run`, default 1). Mac di Domenico: Scozia ridotta e controllo ACN a quattro feature, circa 78 ore-run.
+Mac di Susy: blocco ACN (`coda_mac.csv`), compreso il controllo positivo per persona a 30 copie, circa 160
+ore-run. Stesso pacchetto sui due Mac: Python 3.12.14, numpy 2.4.4, torch 2.14.1; thread fissati dalla coda.
+Le prime run ACN del 14 ottobre sono partite sei alla volta. Prova su Linux con una copia del codice: due run
+lanciate insieme danno gli stessi numeri, cifra per cifra, di una run da sola con gli stessi thread; con un
+numero di thread diverso la loss cambia alla quarta cifra significativa. Sul Mac la stessa verifica è in coda:
+`verifica_parallelo_acn_canaryA_nodp_s42` rifà da sola una run già fatta in parallelo, e i due JSON devono
+coincidere.
+
+**Previsioni**, scritte il 14 ottobre prima di qualunque run della campagna. Sono le quattro del documento
+del 12 ottobre, sulla Scozia ridotta e sul controllo ACN a quattro feature:
+1. Norme: FedAvg sopra C in tutti i round; FedProx sotto C dal round 3-5.
+2. Solo taglio entro 1.5 volte la DP completa per FedAvg; solo rumore entro 1.5 volte la DP completa per
+   FedProx.
+3. Solo Scozia (il controllo ACN non ha la curva in μ): minimo della curva di μ sotto DP intorno a 0.01,
+   sulla media dei round 6-10.
+4. Senza DP, FedAvg non peggio di FedProx.
+
+5. DP per record (σ = 1), confermata dalla dottoranda il 14 ottobre: costo sul modello rilasciato (loss
+   sull'holdout al round 10) circa 2 volte il riferimento GroupNorm, come su ACN (claim 2).
+
+Se una previsione non regge, si scrive come condizione al contorno, con i numeri. DP per soggetto: nessuna
+previsione quantitativa, perché su ACN manca ancora un risultato di riferimento; il costo e l'ε si riportano
+come misura, non come verifica di una previsione.
+
+**Analisi.** `scripts/analisi_clipping_json.py` per le norme (sono nel JSON); media geometrica della loss
+sull'holdout al round 10 e sulla media dei round 6-10; rapporti appaiati per seed (solo taglio su DP
+completa, solo rumore su DP completa, per algoritmo); t sul logaritmo.
 
 ## Privacy di gruppo e DP per soggetto (2026-10-13)
 
@@ -2273,9 +2388,189 @@ altrimenti si scrive "la partizione non cambia il leakage rilevabile, ne' natura
 
 ## Rinviato o escluso
 
+- Scozia a 32 council, tutte le sessioni, con attacchi, canary e partizione IID (decisa il 2026-10-13):
+  rinviata il 2026-10-14 a dopo il paper, per la tesi. Config `experiment_scotland_32client*.yaml` e
+  `experiment_scotland32_*.yaml`; righe in `coda_scozia32_tesi.csv` del pacchetto offline.
+
 RQ4 (rilevamento della MIA passiva) esclusa per threat model. ByzantineDetector
 end-to-end e adaptive clipping: lavoro futuro dichiarato. Il secondo dataset è nella
 sezione "Validazione della metodologia oltre ACN". Le
 indagini su LiRA (floor per record, scoring simmetrico) si fanno sulla cella
 canary bilanciata a Office 1, dove la verità è nota, e non toccano la pipeline
 finché E-A ed E-B non sono chiusi.
+
+## Protocollo DP implementato: dove si applicano clipping e rumore (2026-10-15)
+
+Questa sezione descrive il codice così com'è, non il protocollo che avremmo voluto. Riferimenti: `scripts/run_experiments.py` (loop dei client e placement, docstring di `run_fl_rounds`), `src/ml/gradient_manager.py` (`privatize`, `clip_only`, `privatize_aggregate`), `src/ml/subject_dp.py` e `src/ml/autoencoder_trainer.py` (DP per soggetto).
+
+**DP per client, `dp_mode="dp-fedavg"` (default).** Ogni client produce il delta Δw = w_k − w_t rispetto al modello ricevuto a inizio round. Il delta viene tagliato alla norma L2 C (`max_grad_norm`) e riceve rumore gaussiano N(0, σ²C²) sui pesi, tramite `GradientManager.privatize()`. Nel loop di `run_fl_rounds` la chiamata avviene dopo il training locale e prima di `agg.collect()`: il server (o la simulazione del server) riceve l'update grezzo e lo privatizza. Di conseguenza l'IDS (`run_ids`) vede transitoriamente gli update grezzi, come dichiarato nella docstring di `run_fl_rounds`. Questa è una variante più restrittiva e non standard rispetto all'Algoritmo 1 di McMahan et al. 2018: il placement è quello storico del progetto e resta il default per tutte le campagne già pubblicate.
+
+**DP per client, `dp_mode="local"`.** Stesso meccanismo di `dp-fedavg` (clip e rumore per client, prima dell'aggregazione), ma gli update grezzi non vengono mai conservati nei risultati né passati all'IDS: `run_ids` usa solo gli update rumorizzati. Rappresenta il caso in cui il server non vede mai il dato grezzo. Il rumore è lo stesso di `dp-fedavg`, quindi la garanzia formale è la stessa: cambia solo quali osservazioni esistono.
+
+**DP centrale, `dp_mode="central"`.** Ogni client esegue solo `clip_only()`: taglio del delta rispetto al modello ricevuto, nessun rumore. Il server fa FedAvg pesato per `n_samples` e poi aggiunge un solo rumore gaussiano all'aggregato, tramite `privatize_aggregate()`. La sensitività non è C/n ma max_i(n_i/N)·C, dove n_i sono i campioni del client i nel round e N il totale (fix 2026-08-31). Le campagne Central DP prodotte prima di quel fix (5 seed × 8 config, Sprint 10tt) usano la formula precedente, che sottostimava il rumore: l'ε dichiarato per quei run è ottimistico e va dichiarato come tale, oppure va rilanciato.
+
+**DP per soggetto, `ml.subject_dp` (enabled).** Non usa `privatize()`. Dentro ogni client, a ogni passo locale: campionamento di Poisson dei soggetti con probabilità q; per ciascun soggetto estratto al più `max_records_per_subject` sessioni e il gradiente della loss media su quelle; taglio del gradiente a C·w_c, dove w_c è la quota delle sessioni del soggetto nel client (come in ULDP-FL, Kato et al. 2024); somma; rumore N(0, (σC)²); divisione per il numero atteso di soggetti per passo. I pesi inviati al server sono quindi a valle del rumore, e il server non applica nessun ulteriore meccanismo. La pipeline accetta il subject-level solo con `--no-dp` (nessuna DP per client in aggiunta) e rifiuta la combinazione con `record_dp` e con client sintetici.
+
+Ipotesi da dichiarare insieme all'ε. I pesi w_c sono calcolati dalla simulazione (`_subject_cross_client_weights`) con conoscenza diretta delle sessioni che ogni soggetto ha negli altri client; un deployment reale richiede un protocollo di intersezione privata. Non sono contabilizzati: le statistiche min-max calcolate prima del meccanismo, `n_samples` e la loss media di training, che il client invia in chiaro (togliere un soggetto con k sessioni cambia `n_samples` di k), e il numero di soggetti N di ogni client, trattato come pubblico.
+
+**Verifica della figura `observation_points` rispetto al codice.** Le righe client-level sono fedeli. DP-FedAvg mette clip e rumore lato server, come fa il loop; LDP li mette lato client e mostra solo l'osservazione rumorizzata, come fa `dp_mode="local"`; CDP mette il clipping lato client, nessun rumore individuale e un solo rumore sull'aggregato dopo Σ, come fa `central`. La riga subject-level è fedele al meccanismo in `subject_dp.py`. Due cose la figura non mostra: la sensitività max_i(n_i/N) della CDP, e il fatto che `n_samples` e la loss viaggiano in chiaro in tutte le configurazioni (nella riga subject-level è segnalato con M perché lì dipendono dal numero di sessioni del soggetto).
+
+## DP per soggetto: controllo solo taglio, equivalente misurato di A2 (2026-10-15)
+
+**Dove sta il rumore rispetto a un server curioso.** Nella DP per soggetto il rumore entra dentro il client, a ogni passo locale, prima che qualunque peso esca dal client. Contro un aggregatore honest-but-curious è il placement più protettivo fra quelli realizzabili: l'update che il server riceve è già a valle del rumore (punto A della figura delle superfici di osservazione). Il limite non è il placement ma il resto, che va dichiarato insieme all'ε: la garanzia vale per l'ε calcolato, non oltre; `n_samples`, la loss di training e le statistiche min-max escono senza rumore; i pesi w_c dei soggetti presenti in più client sono calcolati dalla simulazione con conoscenza diretta degli altri client; un server malevolo, che altera il modello inviato, è fuori dal modello di minaccia.
+
+**Perché non i tre placement del livello client.** L'analogo di A1 (rumore aggiunto dal server) non esiste: il taglio per soggetto richiede il gradiente di ogni soggetto, che esiste solo dentro il client durante il training; l'update di fine round mescola tutti i soggetti e non si può più tagliare soggetto per soggetto. L'analogo di A2 (taglio nel client, rumore sull'aggregato) richiede un altro algoritmo, DP-FedAvg a livello di utente con i soggetti come client virtuali (McMahan et al. 2018), con campionamento, accounting e utilità diversi: il confronto non isolerebbe il placement. Si misura quindi l'equivalente di A2 con lo stesso algoritmo e σ = 0: il server vede l'update tagliato per soggetto ma senza rumore. Il codice lo supporta senza modifiche (il rumore è aggiunto solo se sigma > 0; l'accountant scrive "nessuna garanzia").
+
+**Disegno.** Canary persona nel regime indotto (`scripts/canary_persona.py`, `experiment_canary_multisite*`: 3 round da 1000 epoche, 7 feature, (32, 16)/8, persone a JPL, 30 copie, spostamento 0, bracci A e B a ruoli scambiati, superfici globale e client JPL). Tre bracci, tutti con GroupNorm, richiesta dal taglio per soggetto: riferimento senza DP (`experiment_canary_multisite_gn.yaml`), solo taglio con σ = 0 (`_subject_s0.yaml`), DP per soggetto completa con σ = 2 (`_subject_s2.yaml`, stessi parametri di `experiment_acn_subjectdp.yaml`: userID, C = 1, 32 soggetti attesi per passo, al più 64 sessioni per soggetto per passo). Le copie della persona conservano il suo userID, quindi contano come un solo soggetto. Seed 42, 123, 456. Etichette dei file `indotto_gn`, `indotto_subject_s0`, `indotto_subject_s2`, distinte da `indotto` delle run con la normalizzazione di default. I config sono generati da `scripts/genera_config_subject_clip.py` e differiscono da `experiment_canary_multisite.yaml` solo in `experiment.name`, `ml.norm` e `ml.subject_dp`.
+
+**Accounting.** Con σ = 2, δ = 10⁻⁵, 1000 epoche × 3 round, seed 42 braccio A: Caltech 15 601 soggetti, ε 6,5; JPL 2 679 soggetti, ε 19,3; Office 1 1 118 soggetti, ε 34,6 (per confronto, con σ = 5: 2,2; 5,9; 9,9). Il numero di soggetti cambia di poco con seed e braccio. Il JSON di `canary_persona.py` non riporta ε: si calcola con `epsilon_single_client` di `src/ml/subject_dp.py` dai soggetti scritti nel log (`[SUBJECT-DP] ... soggetti`). Con σ = 0 nessuna garanzia.
+
+**Costo e macchina.** Prova del 15 ottobre in cloud, stesso codice (hash uguali al repository), 1 round, 2 thread: training 4,5 s per epoca con GroupNorm, 15,5 s per epoca con il taglio per soggetto (3,4 volte); anche σ = 2 gira. Stime per una run su un Mac: 2 h per il riferimento GroupNorm, 6,5 h per i due bracci per soggetto; 18 run, circa 90 ore-run. Coda a parte, `coda_subject_clip.csv` (righe `cps_*`, da `genera_coda.py` del pacchetto; le altre code rigenerate restano identiche), proposta sul Mac di Domenico dopo la coda in corso, perché l'esecutore legge il CSV solo all'avvio. La prima run (`cps_subject_s0_A_s42`) è la prova cronometrata, le altre partono dopo. Se la prova supera 9 h, si scende a due seed prima di proseguire.
+
+**Previsioni**, proposte il 15 ottobre, da confermare dalla dottoranda prima del lancio:
+1. Validità. Nel riferimento GroupNorm la MIA per persona sulla superficie client (JPL) separa membri e non membri: AUC appaiata sopra 0,5 in tutti e tre i seed. Prima del lancio va riletta alla luce delle run `cp_indotto_c30_d0` (normalizzazione di default) in corso sul Mac di Susy. Se non regge, i bracci per soggetto non si leggono come protezione, perché non c'è segnale da sopprimere.
+2. Solo taglio (σ = 0). AUC appaiata sulla superficie client più bassa del riferimento GroupNorm in tutti e tre i seed, ma non a 0,5: il taglio toglie l'amplificazione delle 30 copie (al più 64 sessioni e norma C per passo), ma la persona entra in circa un passo per epoca, circa 3000 volte nella run, e il server vede l'update senza rumore.
+3. DP completa (σ = 2). AUC appaiata entro 0,5 ± 0,05 su entrambe le superfici, e più bassa del solo taglio in almeno due seed su tre.
+
+Lettura. Se il solo taglio porta già l'AUC entro 0,5 ± 0,05, la soppressione nel regime indotto viene dal taglio e non dal rumore, e va scritto così: la protezione formale contro il server curioso resta comunque solo quella del braccio con rumore. Se una previsione non regge, si scrive come condizione al contorno, con i numeri.
+
+**Analisi.** Come il canary persona: il file appaiato `*_AB_*.json` (scritto dalla seconda run di ogni coppia) con AUC appaiata, intervallo di confidenza e p di permutazione per round e superficie; confronti fra bracci per seed al round 3.
+
+## Revisione del 16 ottobre: correzioni prima di qualunque nuova run di attacco
+
+**Decisione della dottoranda, 16 ottobre.** La revisione profonda (Segnalazioni, sezione R, voci
+65-84) ha trovato errori che rendono non difendibili i numeri di LiRA e RMIA gia' prodotti, in tutte
+le modalita'. Si correggono tutti i punti prima di rilanciare. Scelte: GroupNorm in tutte le celle,
+anche senza DP (niente buffer BatchNorm da proteggere, confronti puliti); DP per record con
+campionamento di Poisson, cosi' l'epsilon calcolato e' una garanzia; soggetti delle sessioni senza
+userID ricostruiti dalle abitudini con profili appresi su dati fuori dal training e assegnati
+sessione per sessione (un clustering sul training renderebbe il soggetto dipendente dalle altre
+sessioni e romperebbe la garanzia). CLAUDE.md riserva al supervisore le modifiche a scorer, unita'
+protetta e threat model: qui le decide la dottoranda, che lavora in autonomia.
+
+**Cosa resta valido.** Le misure di utilita' delle celle gia' fatte restano corrette per il loro
+setup, ma con GroupNorm ovunque e pesi di FedAvg pubblici non sono piu' le celle del paper: si
+rifanno insieme agli attacchi. Le run in coda sul Mac principale (persona, canary persona) e sul Mac
+di Domenico (`coda_subject_clip.csv`) girano con il codice vecchio: valgono come prove, non entrano
+nel paper.
+
+**Ordine del lavoro.**
+1. LiRA e RMIA: ogni shadow con un `AutoencoderTrainer` proprio e persistente fra i round, in ogni
+   modalita' (FedProx, stato di Adam, stesso meccanismo DP del client); insieme IN della stessa
+   taglia del client; dp-fedavg senza privatizzare gli shadow quando si attacca l'update grezzo;
+   varianza fissa per client e round (Carlini et al. 2022) al posto della soglia; superficie global
+   con lo shadow al posto del client nell'aggregato; RMIA con popolazione pubblica senza etichette,
+   offline calibrato o tolto, stessi campioni di LiRA; thread fissati e scritti nel JSON; non membri
+   delle celle IID ripartiti come i membri; punti minori della voce 73.
+2. Meccanismi DP: GroupNorm ovunque; pesi di aggregazione pubblici e loss non inviata nelle celle
+   con DP; normalizzazione con limiti pubblici; DP per record con Poisson e gradienti per esempio
+   con `torch.func.vmap` (7 volte piu' veloce del ciclo, stesse somme a 1,5e-8); sigma della DP
+   per client calibrato con il meccanismo gaussiano analitico e epsilon totale con RDP, adiacenza
+   add/remove dichiarata; righe non finite scartate; booleani letti in modo stretto.
+3. Soggetti dalle abitudini: profili appresi fuori dal training, misura su chi ha userID di quanti
+   profili tocca una persona vera (privacy di gruppo sul numero di profili), accounting.
+4. Script persona e canary: voci 82-84.
+5. Shadow in parallelo su processi a un thread (piu' thread nello stesso processo non accelerano:
+   misura 1,87 s contro 1,89 s; due processi fanno il doppio del lavoro in 1,2 volte il tempo), con
+   risultati identici alla versione sequenziale.
+6. Verifica: test che falliscono sul codice vecchio, suite completa, run di prova su dati reali,
+   seconda revisione indipendente. Solo dopo, previsioni scritte e code nuove.
+
+**Costi.** Da misurare con le run di prova del punto 6: oggi una cella con DP per soggetto e 16 shadow
+costerebbe circa 9 ore e una con DP per record circa 33 ore senza le accelerazioni dei punti 2 e 5.
+
+**Stato al 16 ottobre, sera.** Correzioni fatte nel repository (non committate) e verificate: suite di
+574 test, test "specchio" (uno shadow con i dati e il seed del client riproduce il modello osservato,
+round per round, senza DP, con dp-fedavg, DP per record e per soggetto senza rumore, superficie
+global), seconda revisione indipendente (Segnalazioni, sezione S), run di prova su dati reali in tutte
+le modalita'. Nessuna run da mettere in coda prima delle decisioni seguenti.
+
+**Decisioni aperte.**
+1. Profili di abitudine (voce 88): la persona vera cade in 5-9 profili e l'epsilon per soggetto di
+   Office 1 resta molto alto. Scegliere la dimensione dei profili, oppure limitare la DP per soggetto
+   alle sessioni con userID, oppure dichiarare la protezione per gruppi di profili.
+2. Limiti pubblici della normalizzazione (`LIMITI_PUBBLICI`): proposta da confermare.
+3. `lira.n_shadow: 32` (voce 89) e `ml.common_init: true` (protocollo standard, segnalazione 48) nei
+   config della nuova campagna.
+
+**Costi misurati** (un thread, macchina cloud, 50 epoche, client di 25.000 sessioni): circa 2,1 minuti
+per client e round senza DP, 6,2 con DP per record (vmap), 17,7 con DP per soggetto senza profili. Una
+cella con 32 shadow allena 33 modelli per round; con i processi (`--lira-workers`) il tempo si divide
+per il numero di core.
+
+
+## Campagna v2 (decisa il 2026-10-16, dopo la revisione)
+
+**Scelte della dottoranda, 16 ottobre ("procedi con i suggerimenti").** LiRA completa con 32 shadow
+(`--n-shadow 32`, epoche del client, Segnalazioni 89); inizializzazione comune in tutte le run FL
+(`--common-init`, segnalazione 48); limiti pubblici di `LIMITI_PUBBLICI` come proposti; DP per soggetto
+con profili di circa 100 sessioni di training (`ml.subject_dp.profili.dimensione_media: 100` nei config
+ACN), sigma = 5 cella principale a 5 seed e sigma = 2 secondaria a 3 seed, protezione della persona
+dichiarata per gruppi di profili (mediana 7, p90 31, Segnalazioni 88). Attaccante delle celle con DP per
+client su A3 (`--dp-mode local`): stesso training di dp-fedavg, ma LiRA osserva l'update dopo il
+meccanismo. Controllo solo taglio del canary persona a spostamento 0,5 (a 0 il segnale e' debole anche
+senza DP). Code generate da `scripts/genera_coda_v2.py`: `coda_v2_mac.csv` (blocco ACN con attacchi,
+curva in epsilon, MIA per persona), `coda_v2_domenico.csv` (Scozia ridotta, quattro feature, curva di
+capacita', controllo solo taglio), `coda_v2_windows.csv` (canary persona, canary per sessione).
+Stime: priorita' 1 circa 55 ore sul Mac principale, 84 sul Mac di Domenico, 36 su Windows; da
+correggere con la prima run cronometrata (`v2_acn_nodp_mu0.01_s42`, `v2_sc3_prova_s42`).
+
+**Cosa cambia nei numeri attesi, prima di vedere le run.** Con il sigma analitico e la sostituzione, a
+parita' di epsilon nominale il rumore per client cresce: a epsilon = 64 sigma passa da 0,076 a 0,253
+(C = 1), a epsilon = 16 da 0,30 a 0,69; epsilon totale su 10 round (RDP) 428 a epsilon = 64 per round,
+84 a 16, 8,1 a 2. DP per record con Poisson e sostituzione, 10 round x 50 epoche: sigma = 1 Caltech 8,3,
+JPL 8,0, Office 1 55,8; sigma = 2 3,4 / 3,3 / 19,8; sigma = 5 1,2 / 1,2 / 6,3.
+
+**Previsioni, scritte prima del lancio.**
+- V1. Utilita', RQ3: con DP per client a epsilon = 64 FedProx ha loss sull'holdout al round 10 minore di
+  FedAvg in almeno 4 seed su 5; senza DP FedProx e' peggiore in almeno 4 su 5 (come con init comune il
+  14 ottobre). Il costo della DP cresce per tutti e due rispetto alle run vecchie (rumore 3,3 volte).
+- V2. LiRA e RMIA v2, regime naturale ACN senza DP, superficie client: AUC per seed fra 0,45 e 0,56,
+  composta fra 0,45 e 0,57. Se l'AUC supera 0,56 in almeno 3 seed, l'attacco corretto vede un segnale che
+  la versione 1 non vedeva, ed e' un risultato da riportare.
+- V3. Con DP (per client su A3, per record, per soggetto) l'AUC non supera quella senza DP dello stesso
+  seed di piu' di 0,01 e sta fra 0,45 e 0,55.
+- V4. DP per record (Poisson, GroupNorm): costo di utilita' rispetto a `v2_acn_nodp_mu0.01` fra 1,2 e 2
+  volte a sigma = 1, fra 1,5 e 3 a sigma = 2, crescente con sigma; sigma = 0 (solo taglio) entro 1,2.
+- V5. DP per soggetto con profili, sigma = 5: costo di utilita' non superiore a quello della DP per record
+  a sigma = 2.
+- V6. Canary persona indotto senza DP, spostamento 0,5: AUC appaiata sulla superficie client (metrica
+  primaria) almeno 0,7 con p < 0,05 in almeno 3 seed su 5; a spostamento 0 piu' bassa.
+- V7. Controllo solo taglio (Domenico): il braccio GroupNorm come V6; solo taglio (sigma = 0): segnale
+  ridotto ma presente; sigma = 2: al caso.
+- V8. MIA per persona: oracolo calibrato senza DP con AUC fino a 0,56 e intervallo che contiene 0,5 in
+  almeno 4 seed su 5; con DP non sopra il senza DP.
+- V9. Scozia ridotta: LiRA e RMIA al caso, come ACN. Curva di capacita': AUC non decrescente con la
+  capacita'. Canary per sessione su piu' siti (priorita' 2): segnale sulla loss grezza dei canary senza DP,
+  al caso con A3 a epsilon = 64.
+
+**Prima del lancio.** Fermare le code in corso (codice vecchio) e installare l'aggiornamento su ogni
+macchina; le run vecchie restano in `esiti/` come prove.
+
+**Controllo aggiuntivo v2b (2026-10-18, Mac di Domenico, `coda_v2b_domenico.csv`).** Nella v2 la DP per
+soggetto con sigma = 2 lascia vedere il canary persona (AUC appaiata 0,79 / 0,77 / 0,53, p 0,001 / 0,002 /
+0,37). Non contraddice la garanzia: con 3 x 1000 epoche l'epsilon della persona canary e' circa 112
+(`scripts/epsilon_canary_persona.py`, accountant di `ml.subject_dp`, sostituzione, delta 1e-5). La
+previsione V7 ("sigma = 2: al caso") era sbagliata perche' l'epsilon non era stato calcolato prima. Celle
+nuove, 3 seed, bracci A e B: sigma 5 e 8 a 1000 epoche (epsilon circa 29 e 15,5); a 200 epoche
+riferimento senza DP, solo taglio e sigma 5 (epsilon circa 10). Config nuovi
+`experiment_canary_multisite_subject_s5/_s8.yaml` (copie di `_s2`). Il codice dei risultati v2 non cambia.
+Previsioni, scritte prima del lancio:
+- V10. 1000 epoche: AUC appaiata (client, round 3) decrescente con sigma; a sigma 8 sotto 0,7 in almeno
+  2 seed su 3, ma non necessariamente al caso (epsilon 15,5 non lo impone).
+- V11. 200 epoche, senza DP: il canary si vede ancora (AUC almeno 0,65 con p < 0,05 in almeno 2 seed su
+  3); se non si vede, le celle a 200 epoche non dicono nulla sulla DP e lo si scrive.
+- V12. 200 epoche, sigma 5 (epsilon circa 10): AUC sotto quella senza DP dello stesso seed in tutti e 3 i
+  seed.
+
+**Risultati v2b (2026-10-19, Mac di Domenico, 32 righe, 0 errori).** Epsilon dai log con
+`scripts/epsilon_canary_persona.py`: sigma = 5 a 1000 epoche 28,6-29,1; sigma = 8 a 1000 epoche 15,3-15,6;
+sigma = 5 a 200 epoche 10,1-10,2, tutti in linea con le stime. AUC appaiata sulla superficie client, round 3,
+media dei seed 42/123/456: senza DP a 200 epoche 0,87 (p < 0,001 in tutti); solo taglio a 200 epoche 0,64
+(p 0,05-0,10); sigma = 5 a 200 epoche 0,69 (p 0,001 / 0,012 / 0,19); sigma = 5 a 1000 epoche 0,74 (p 0,002-0,027);
+sigma = 8 a 1000 epoche 0,66 (p 0,015 / 0,019 / 0,20). Previsioni: V10 confermata (a 1000 epoche l'AUC cala con
+sigma; sigma = 8 sotto 0,70 in due seed su tre); V11 confermata (il canary si vede senza DP in tre seed su tre);
+V12 confermata nel confronto con il senza DP, ma il solo taglio fa gia' scendere l'AUC a circa 0,64: a 200 epoche
+il rumore non abbassa ulteriormente il segnale (intervalli sovrapposti). Conclusione provvisoria: con epsilon fra
+circa 15 e 29 la persona canary resta rilevabile in questo attacco (AUC 0,66-0,74). Solo tre seed; intervalli
+di circa +/-0,15.

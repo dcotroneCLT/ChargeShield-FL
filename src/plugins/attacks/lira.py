@@ -51,6 +51,27 @@ class LiRAAttack(BaseAttack):
         fl_results: dict[int, dict[str, Any]],
         **kwargs: Any,
     ) -> dict[int, dict[str, Any]]:
+        # Versione 2 (2026-10-16, Segnalazioni R voci 65-73): default per ogni
+        # config che non chiede esplicitamente lira.version: 1. La versione 1
+        # resta solo per riprodurre le run precedenti.
+        if int((cfg.get("lira", {}) or {}).get("version", 2)) == 2:
+            from plugins.attacks.lira2 import run_lira_v2  # noqa: PLC0415
+            _composed2: dict[str, Any] = {}
+            results = run_lira_v2(
+                cfg, train_sessions, holdout_sessions, fl_results,
+                n_shadow=kwargs.get("n_shadow", 16),
+                shadow_epochs_cap=kwargs.get("shadow_epochs_cap"),
+                no_dp=kwargs.get("no_dp", False),
+                dp_mode=kwargs.get("dp_mode", "dp-fedavg"),
+                cluster_membership=kwargs.get("cluster_membership"),
+                composed_output=_composed2,
+                per_sample_dump_path=kwargs.get("per_sample_dump_path"),
+                workers=int(kwargs.get("lira_workers", 1) or 1),
+            )
+            if results and _composed2:
+                results[max(results.keys())].update(_composed2)
+            return results
+
         from run_experiments import run_lira  # noqa: PLC0415 (lazy, vedi yeom.py)
 
         # Sprint 10zz+29 (2026-09-03, task #54) — vedi yeom.py per la

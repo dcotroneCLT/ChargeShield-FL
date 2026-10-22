@@ -68,6 +68,7 @@ from ml.autoencoder_trainer import AutoencoderTrainer  # noqa: E402
 
 from run_experiments import (  # noqa: E402
     compute_feature_stats,
+    statistiche_normalizzazione,
     enrich_sessions,
     load_config,
     normalize_sessions,
@@ -764,9 +765,10 @@ def main() -> None:
     # file), qualunque numero prodotto da questa pipeline offline contro un vero
     # dump NVFLARE va trattato come indicativo, non come replica esatta della
     # normalizzazione realmente vista da ciascun client in training.
-    feature_stats = compute_feature_stats(train_sessions, _FEATURES)
-    train_sessions = normalize_sessions(train_sessions, feature_stats, _FEATURES)
-    holdout_sessions = normalize_sessions(holdout_sessions, feature_stats, _FEATURES)
+    # limiti pubblici come la simulazione (2026-10-16)
+    feature_stats, _clip, _ = statistiche_normalizzazione(cfg, train_sessions, _FEATURES)
+    train_sessions = normalize_sessions(train_sessions, feature_stats, _FEATURES, clip=_clip)
+    holdout_sessions = normalize_sessions(holdout_sessions, feature_stats, _FEATURES, clip=_clip)
 
     # ── IDS — stessa funzione, stessa logica, usata dalla simulazione ───────
     ids_results: dict = {}

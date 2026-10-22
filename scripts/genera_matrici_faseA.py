@@ -176,7 +176,10 @@ def stato_validita(cfg: dict, sweep: str, reg: str, ts: datetime,
     """
     can = cfg.get("canary") or {}
     e_canary = reg.startswith("canary")
-    raw_pulita = mia.get("canary_raw_n_member_distinct") is not None
+    # LiRA v2 (2026-10-16) calcola la loss grezza dei canary su tutti i canary,
+    # senza filtro di calibrazione: e' pulita per costruzione.
+    raw_pulita = (mia.get("canary_raw_n_member_distinct") is not None
+                  or mia.get("lira_version") == 2)
 
     if e_canary and not can:
         if dal_log:

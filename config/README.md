@@ -27,6 +27,18 @@
 | `experiment_ctrl_common_init.yaml` | solo `ml.common_init: true` | controllo del protocollo, segnalazione 48; no-DP, seed 42 |
 | `experiment_robustness_entity_split.yaml` | `split.strategy: entity_aware` | robustezza dello split, già eseguito a 5 seed |
 | `experiment_chargeplace_scotland.yaml` | secondo dataset, 3 council area | futuro; una sola run di prova |
+| `experiment_sc3.yaml`, `experiment_sc3_mu0.yaml` | Scozia ridotta: Glasgow City, Dundee City, Shetland Islands, settembre-novembre 2023, quattro feature; FedProx e FedAvg | RQ3, replica ridotta (2026-10-14), con `--no-dp`, sola utilita' |
+| `experiment_sc3_eps64.yaml`, `experiment_sc3_mu0_eps64.yaml` | come sopra, eps 64, C 1 | RQ3, DP completa e, con `--dp-ablation`, solo taglio e solo rumore |
+| `experiment_sc3_mu0.001_eps64.yaml`, `experiment_sc3_mu0.1_eps64.yaml` | come sopra, mu 0.001 e 0.1 | RQ3, curva in mu sotto DP |
+| `experiment_sc3_groupnorm.yaml` | come `experiment_sc3.yaml` con `ml.norm: group` | RQ1, riferimento della DP per record e per soggetto, `--no-dp` |
+| `experiment_sc3_recorddp.yaml` | `ml.norm: group`, `ml.record_dp` C 1, sigma 1 | RQ1, DP per record sulla Scozia, `--no-dp` |
+| `experiment_sc3_subjectdp.yaml` | `ml.norm: group`, `ml.subject_dp` (colonnina) C 1, sigma 5 | RQ1, DP per soggetto sulla Scozia, `--no-dp` |
+| `experiment_cap32_16.yaml`, `experiment_cap64_32.yaml`, `experiment_cap128_64.yaml` | solo `ml.hidden_dims` e `ml.latent_dim` (1 870, 6 294, 22 822 parametri contro 618) | RQ1, curva di sensibilita' in capacita' (2026-10-14), `--no-dp`, LiRA e RMIA |
+| `experiment_canary_multisite_gn.yaml`, `_subject_s0.yaml`, `_subject_s2.yaml` | da `experiment_canary_multisite.yaml` (generati da `scripts/genera_config_subject_clip.py`): `ml.norm: group`; nei due bracci per soggetto `ml.subject_dp` (userID, C 1, 32 soggetti attesi per passo, al piu' 64 sessioni) con sigma 0 (solo taglio) e 2 | DP per soggetto, controllo solo taglio (equivalente misurato di A2, 2026-10-15), con `scripts/canary_persona.py`, regime indotto |
+| `experiment_acn4f.yaml`, `experiment_acn4f_mu0.yaml` | solo `ml.input_dim: 4` e `ml.feature_names` (le quattro feature comuni con la Scozia) rispetto a `experiment.yaml` e `experiment_rq3_mu0.yaml` | RQ3, controllo ACN a quattro feature (2026-10-14), con `--no-dp`, sola utilita' |
+| `experiment_acn4f_eps64.yaml`, `experiment_acn4f_mu0_eps64.yaml` | come sopra rispetto a `experiment_rq1_eps64.yaml` e `experiment_rq3_mu0_eps64.yaml` | RQ3, controllo ACN a quattro feature: DP completa e, con `--dp-ablation`, solo taglio e solo rumore; sola utilita' |
+| `experiment_scotland32_recorddp.yaml` | da `experiment_scotland_32client.yaml`: `ml.norm: group` e `ml.record_dp` (C = 1, sigma = 5) | RQ1, Scozia completa (2026-10-14), con `--no-dp`; circa 4-6 giorni a run; rinviato alla tesi (Scozia a 32 council) |
+| `experiment_scotland32_mu0_subjectdp.yaml` | da `experiment_scotland_32client_subjectdp.yaml`: solo `ml.proximal_mu: 0.0` (FedAvg) | RQ1 e RQ3, Scozia completa (2026-10-14), con `--no-dp`; rinviato alla tesi (Scozia a 32 council) |
 
 ## Diagnostiche LiRA: non usare finché lo scorer è congelato
 

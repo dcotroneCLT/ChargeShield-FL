@@ -13,14 +13,16 @@ importato dentro le funzioni) cosi' i test non richiedono torch.
 Cosa si calcola, per ogni client i con n_i record di training, batch B, E epoche
 locali per round e T round:
 
-1. `epsilon` di Poisson (valore principale, APPROSSIMAZIONE). RDP accountant,
-   adiacenza add/remove, campionamento di Poisson con q_i = B / n_i,
-   passi = floor(n_i / B) * E * T. E' la contabilita' standard di DP-SGD ed e'
-   il numero confrontabile con la letteratura. Ma il training qui non campiona
-   alla Poisson: usa `DataLoader(shuffle=True, drop_last=True)`
-   (`src/ml/autoencoder_trainer.py`), cioe' batch di dimensione fissa presi da
-   una permutazione per epoca. Con lo shuffle l'accountant di Poisson non e' una
-   garanzia e puo' sottostimare epsilon (Chua et al., ICML 2024).
+1. `epsilon` di Poisson (valore principale). Dal 2026-10-16: adiacenza per
+   SOSTITUZIONE di un record (n_i fisso, coerente con n_i e i pesi di
+   aggregazione che il server vede), accountant PLD; per confronto anche
+   add/remove (RDP, `epsilon_add_remove`). Campionamento di Poisson con
+   q_i = B / n_i, passi = floor(n_i / B) * E * T. Dal 2026-10-16 il training
+   campiona davvero alla Poisson con questi parametri
+   (`AutoencoderTrainer._train_local_record_dp`), quindi il numero e' una
+   garanzia. Prima il training usava
+   `DataLoader(shuffle=True, drop_last=True)` e il numero era solo
+   un'approssimazione (Chua et al., ICML 2024): vale per le run precedenti.
 
 2. Limite valido con lo shuffle, senza amplificazione da campionamento.
    Adiacenza per SOSTITUZIONE di un record (n fissato): in ogni epoca un record
@@ -46,6 +48,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from ml.subject_dp import flag
+
 logger = logging.getLogger(__name__)
 
 
@@ -63,18 +67,21 @@ def _param(cfg: dict, section: str, key: str) -> Any:
 
 def epsilon_poisson(
     n: int, batch_size: int, epochs: int, rounds: int,
-    noise_multiplier: float, delta: float,
+    noise_multiplier: float, delta: float, relazione: str = "sostituzione",
 ) -> tuple[float, int, float]:
-    """(epsilon, passi, q) per UN client, RDP con campionamento di Poisson,
-    adiacenza add/remove. Con n < batch_size il client non produce batch
-    (drop_last=True): 0 passi, epsilon 0."""
-    from dp_accounting import dp_event, rdp
+    """(epsilon, passi, q) per UN client, campionamento di Poisson. Relazione
+    di default: sostituzione di un record (PLD), coerente con n pubblico; con
+    "add_remove", RDP (vedi ml.subject_dp.accountant). Con n < batch_size il
+    client non fa passi: epsilon 0."""
+    from dp_accounting import dp_event
+
+    from ml.subject_dp import accountant
 
     if n < batch_size:
         return 0.0, 0, float(batch_size) / float(n) if n else float("nan")
     steps = (n // batch_size) * epochs * rounds
     q = float(batch_size) / float(n)
-    acc = rdp.RdpAccountant()
+    acc = accountant(relazione)
     acc.compose(
         dp_event.PoissonSampledDpEvent(q, dp_event.GaussianDpEvent(noise_multiplier)),
         steps,
@@ -104,7 +111,10 @@ def record_dp_accounting(
     for cid, n in n_per_client.items():
         eps, steps, q = epsilon_poisson(
             int(n), batch_size, epochs, rounds, noise_multiplier, delta)
-        per_client[str(cid)] = {"n": int(n), "q": q, "passi": steps, "epsilon": eps}
+        eps_ar, _, _ = epsilon_poisson(
+            int(n), batch_size, epochs, rounds, noise_multiplier, delta, relazione="add_remove")
+        per_client[str(cid)] = {"n": int(n), "q": q, "passi": steps, "epsilon": eps,
+                                "epsilon_add_remove": eps_ar}
     worst = max(per_client, key=lambda c: per_client[c]["epsilon"])
     return {
         "per_client": per_client,
@@ -136,7 +146,8 @@ def record_dp_fields(
     rdp_cfg = ml.get("record_dp") or cfg.get("record_dp") or {}
     out: dict[str, Any] = {
         "record_dp": rdp_cfg or None,
-        "norm": ml.get("norm", "batch"),
+        # norm effettiva: default "group" dal 2026-10-16 (prima "batch")
+        "norm": ml.get("norm", "group"),
         "batch_size": _param(cfg, "ml", "batch_size"),
         "n_train_sessions": n_sessions,
         "n_train_per_client": dict(n_per_client) if n_per_client else None,
@@ -146,7 +157,7 @@ def record_dp_fields(
         "record_dp_accounting": None,
         "record_dp_accounting_note": None,
     }
-    if not rdp_cfg.get("enabled"):
+    if not flag(rdp_cfg.get("enabled", False)):
         out["record_dp_accounting_note"] = (
             "record-DP disattivo: il campo 'epsilon' si riferisce al "
             "meccanismo client-level (weight perturbation)."
@@ -209,8 +220,11 @@ def record_dp_fields(
     out["record_dp_accounting"] = {
         "accountant": "RDP (dp-accounting)",
         "dp_accounting_version": _ver,
-        "principale": ("Poisson, adiacenza add/remove, q = B/n per client; "
-                       "APPROSSIMAZIONE: il training usa shuffle con batch fissi"),
+        "principale": ("Poisson, SOSTITUZIONE di un record (n pubblico), PLD; "
+                       "q = B/n per client, passi = floor(n/B)*E*T; dal 2026-10-16 il "
+                       "training campiona alla Poisson con gli stessi parametri"),
+        "secondario": "add/remove (RDP) per confronto: per_client[*].epsilon_add_remove",
+        "campionamento_training": "poisson",
         "limite_shuffle": ("adiacenza per sostituzione, senza amplificazione: "
                            "E*T meccanismi gaussiani con moltiplicatore sigma/2"),
         "noise_multiplier": sigma, "batch_size": batch, "epochs": epochs,
@@ -223,9 +237,8 @@ def record_dp_fields(
         f"epsilon_record_dp = {acc['epsilon_max']:.4g} (massimo sui client, "
         f"{acc['client_peggiore']}; per client: {per_c}). RDP, Poisson "
         f"add/remove, sigma={sigma}, B={batch}, E={epochs}, T={rounds}, "
-        f"delta={delta}: APPROSSIMAZIONE, il training usa shuffle. Limite valido "
-        f"con lo shuffle (sostituzione, senza amplificazione): "
-        f"{acc['epsilon_shuffle_bound']:.4g}. Questi, NON il campo 'epsilon', "
-        "sono il budget di questa cella."
+        f"delta={delta}, sostituzione di un record (PLD); il training campiona alla Poisson con gli stessi "
+        "parametri (dal 2026-10-16), quindi e' una garanzia. Il campo "
+        "'epsilon' NON si applica a questa cella."
     )
     return out

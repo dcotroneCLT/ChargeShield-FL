@@ -583,3 +583,129 @@ sono in `scripts/_applicati/`.*
     la sola loss del target. Non è un errore di codice ma la stessa discrepanza fra shadow e
     target della segnalazione 63; su un solo sito i due valori differiscono. Da riportare se
     si usa Shadow sui canary con più client.
+
+## R. Revisione profonda di LiRA, RMIA, DP e script persona (2026-10-16)
+
+Tre revisori indipendenti (LiRA/RMIA; DP per soggetto, per record e per client; `mia_persona.py` e
+`canary_persona.py`), poi controllo dei punti gravi. Righe di `scripts/run_experiments.py` riferite
+al file di 88dfae8 (md5 226fc5d4). "Codice" = verificato leggendo il codice; "misura" = verificato
+eseguendo. Decisione della dottoranda, 16 ottobre: si correggono tutti i punti; GroupNorm in tutte le
+celle, DP per record con campionamento di Poisson, soggetti ricostruiti dalle abitudini con profili
+appresi fuori dal training.
+
+65. **Gli shadow di LiRA non si allenano come il client reale, in nessuna modalità** (codice; misura
+    su dati sintetici). Ciclo Adam a righe 4216-4234: niente termine FedProx (i config hanno
+    mu = 0,01; norma del delta 0,51 con mu contro 1,41 senza, revisore), Adam nuovo a ogni round
+    mentre il client conserva lo stato, insieme IN di (membri + holdout)/2 (riga 4022), circa il 62%
+    dei dati del client. Tocca tutti i numeri LiRA e RMIA prodotti.
+66. **Con DP per record o per soggetto gli shadow erano senza DP** (codice; i log dicono
+    `dp_su_shadow=no (--no-dp)`, per esempio `logs/rq1_recorddp_nm1.log`). Non validi i numeri di
+    LiRA di `rq1-recorddp-nm0/nm1/nm2/nm5` (20 run) e `_final_rdp_*` (6 run). Corretto il 16
+    ottobre nel ramo con `AutoencoderTrainer.train_local` (`_shadow_via_trainer`), test
+    `tests/test_lira_shadow_meccanismo.py`; restano i punti della 65.
+67. **dp-fedavg con DP: il bersaglio e' l'update grezzo, gli shadow sono privatizzati** (codice): riga
+    4117 contro riga 4267. La calibrazione non corrisponde al bersaglio.
+68. **La varianza di LiRA e' quasi sempre quella di ripiego** (log: floor_hit circa 0,997; misura del
+    revisore con 16 shadow: la soglia vale 4-17 volte la dispersione fra shadow). Righe 4678-4720.
+    Con sigma_in = sigma_out = soglia il punteggio diventa una forma di Sablayrolles pesata; la
+    scala 1/sigma^2 diversa per client entra nel ROC aggregato.
+69. **Superficie "global": shadow di un solo client contro il modello aggregato** (codice, righe 4141
+    e 4631).
+70. **RMIA** (codice, righe 3019-3070): popolazione z definita con le etichette (`~memb`), innocua
+    con gamma = 1 ma sbagliata in generale; versione offline con a = 0,3 fisso, non invariante di
+    scala; RMIA e LiRA valutati su insiemi diversi; RMIA composto calcolato solo se LiRA composto
+    non e' vuoto.
+71. **I numeri dipendono dal numero di thread** (misura: con 1 e 2 thread cambiano 22 campi, AUC
+    RMIA 0,5383 contro 0,5389). Thread da fissare e scrivere nel JSON.
+72. **Partizione IID: membri rimescolati fra i client, non membri ancora per sito** (codice: righe
+    7858-7875 contro 3774-3796). L'AUC delle celle IID mescola spostamento di distribuzione e
+    memorizzazione.
+73. **Minori di LiRA** (codice): con `common_init` gli shadow del round 1 partono da pesi casuali;
+    `torch.manual_seed(_s)` (riga 4199) reimposta il generatore globale per gli attacchi successivi;
+    l'avviso "shadow skippato" (circa riga 4055) e' falso, lo shadow resta e non si allena;
+    `shadow_init: cold` nel ramo trainer toglie l'ancora FedProx che il client ha.
+74. **DP per client con BatchNorm: `running_mean` e `running_var` escono senza taglio ne' rumore**
+    (codice, `src/ml/gradient_manager.py` righe 535-548 e 610-622; `norm` di default `batch`). La
+    garanzia formale non copre quei valori.
+75. **I pesi di FedAvg (`n_samples`) dipendono dai dati** (`src/ml/autoencoder_trainer.py` righe 559
+    e 575, `src/ml/fedavg_aggregator.py`); anche la loss del client esce senza protezione.
+76. **Normalizzazione min-max calcolata sul training** (`normalize_sessions`, riga 1058): fuori dalla
+    DP; in `mia_persona.py` le statistiche vengono anche dai membri (riga 203).
+77. **DP per record: training con shuffle (`DataLoader`, riga 537 del trainer), accounting di
+    Poisson** (codice). L'epsilon di Poisson non e' una garanzia; il limite valido con lo shuffle e'
+    quasi vuoto (81 con sigma = 5).
+78. **Sigma della DP per client: formula classica valida solo per epsilon < 1**
+    (`gradient_manager.py` riga 223) mentre i config usano 16-256; adiacenza non dichiarata; la
+    modalita' central e' corretta solo con pesi pubblici e adiacenza add/remove a denominatore fisso.
+79. **Input non finiti aggirano il taglio** (misura del revisore: un `inf` rende NaN la somma): righe
+    317 e 392 del trainer (`min(1.0, nan) == 1.0`), `row_valid` in `src/ml/subject_dp.py` riga 118.
+80. **`record_dp.enabled` letto con `bool()`** (trainer riga 109): la stringa "false" lo accende.
+81. **Soggetti della DP per soggetto**: le sessioni senza userID sono soggetti singoli (Caltech 12.068
+    su 12.613, JPL 1.729 su 2.239, Office 1 879 su 901); per una persona senza userID la protezione
+    vale per sessione.
+82. **`scripts/mia_persona.py`** (misura del revisore): cache del riferimento indicizzata solo da seed,
+    round ed epoche (righe 211-221), riusata con config o `--min-sessioni` diversi; intervallo per
+    sessione con bootstrap sulle sessioni (righe 290-293: ampiezza 0,010 contro 0,096 per persona);
+    BatchNorm nel braccio senza DP e GroupNorm nei bracci con DP (righe 68-81); niente epsilon nel
+    JSON; riferimento addestrato su uno sfondo poco simile alle persone valutate.
+83. **`scripts/canary_persona.py --combina`** (misura del revisore): non controlla braccio, round,
+    epoche, numero di sessioni, feature ne' config (righe 175-179, 224-225, 297-300); il braccio A
+    copiato come B da' un AUC 0,5 falso; i nomi dei file non contengono round ed epoche.
+84. **Confronti multipli senza correzione** in `mia_persona.py` e `canary_persona.py`.
+
+Falso allarme registrato: gli epsilon della DP per soggetto in `ESPERIMENTI.md` (6,5 / 19,3 / 34,6
+con sigma = 2) sono giusti per il canary multisito (1000 epoche x 3 round); ricalcolati 6,55 /
+19,33 / 34,56.
+
+Stato delle voci 65-84 al 16 ottobre, sera (codice nel repository, non ancora committato; suite 574
+test passati; run di prova su dati ACN reali, 2 round x 2 epoche, in tutte le modalita'): 65-70, 72, 73
+corrette con LiRA e RMIA v2 (`src/plugins/attacks/lira2.py`, default; `lira.version: 1` per le run
+vecchie); 71 numero di thread fissabile (`--threads`) e scritto nel JSON; 74 GroupNorm di default e
+errore con DP per client e BatchNorm; 75 pesi di aggregazione = numerosita' dei client, pubbliche con
+l'adiacenza per sostituzione, e loss trattenuta nel client nelle celle con DP; 76 limiti pubblici
+(`LIMITI_PUBBLICI` in `scripts/run_experiments.py`, proposta da confermare); 77 DP per record con
+campionamento di Poisson e vmap; 78 sigma dal meccanismo gaussiano analitico; 79-80 corrette; 81
+profili di abitudine (`src/ml/profili_abitudini.py`), con la misura della voce 88; 82-84 corrette negli
+script persona e canary.
+
+## S. Seconda revisione indipendente delle correzioni (2026-10-16)
+
+85. **Central DP: rumore meta' del necessario per l'adiacenza dichiarata** (misura del revisore): il
+    FedAvg rinormalizza sui client presenti, quindi aggiungere o togliere un client cambia anche i
+    pesi degli altri. Corretto: adiacenza per SOSTITUZIONE dei dati di un client in tutte le
+    modalita', D = 2C per client e D = 2 max_i(w_i) C in central, controllo che tutti i client
+    partecipino a ogni round.
+86. **n e i pesi di aggregazione sono osservabili dal server**, quindi l'adiacenza add/remove non e'
+    coerente per DP per record e per soggetto. Corretto: epsilon principale per SOSTITUZIONE di un
+    record o di un soggetto (PLD, `ml.subject_dp.accountant`), add/remove (RDP) riportato per
+    confronto. Esempio Office 1, sigma = 1, B = 32, 10 x 50: 55,8 contro 30,2.
+87. **Minori corretti**: opzioni della LiRA v1 (`shadow_init: cold`, `floor_mode`, `member_scoring`,
+    `canary_rescale`) bloccate prima del FL con LiRA v2; canary fuori dalle metriche principali;
+    `composed_rmia_loglr_*` al posto di `composed_rmia_*` (somma dei log-rapporti); n di shadow
+    eseguiti nel JSON; p di Mann-Whitney unilaterale al posto di 1000 permutazioni, metrica primaria
+    senza correzione e Holm sulle secondarie; norma effettiva nel JSON; limiti per le feature assenti
+    in Scozia e per `start_time_epoch`; matrici che riconoscono la LiRA v2; profili scalati sulle
+    sessioni di training, errore se un sito non ha profili o se la normalizzazione non e' pubblica;
+    hash del codice nella cache del riferimento persona; normalizzazione pubblica anche in
+    `run_nvflare_mia.py` e `check_canary_init_confound.py`.
+88. **Profili di abitudine: protezione debole per la persona vera** (misura, `scripts/misura_profili.py`,
+    seed 42, persone con userID del training): con profili di 20-500 sessioni di training una persona
+    (mediana 12 sessioni) cade in 5-9 profili, p90 17-51. Con sostituzione e 10 round x 50 epoche:
+    sigma = 5 Caltech 7,8-10,9, JPL 10,1-11,2, Office 1 53-105; sigma = 2 Caltech 25-36, JPL 34-38,
+    Office 1 oltre 200. Decisione aperta.
+89. **Con IN della taglia del client gli shadow OUT per campione sono pochi**: universo membri +
+    non membri, quota IN circa 0,85; con 8 shadow il 28% dei campioni non ha shadow OUT e non si
+    valuta, con 32 circa lo 0,5%. Da fissare `lira.n_shadow: 32`.
+
+## T. Controlli della campagna v2b (2026-10-19)
+
+90. **Avviso fuorviante con la DP per soggetto** (`scripts/run_experiments.py`, avviso di avvio; `scripts/canary_persona.py`
+    con `no_dp=True`): con `subject_dp` attiva compare "Rumore Differential Privacy DISABILITATO (sigma=0)". La riga
+    `[SUBJECT-DP] ... sigma=5.0` mostra che il rumore e' attivo. Nessun effetto sui numeri; va corretto il testo
+    dell'avviso.
+91. **Raccolta dei risultati canary**: nella copia del raccoglitore del Mac di Domenico `canary_persona.csv` non e' stato
+    scritto. Con la versione corrente di `raccogli_risultati.py` lo stesso zip produce il file (45 righe). Da
+    riverificare sul Mac di Domenico con la copia aggiornata.
+92. **Pacchetto senza dati**: `aggiornamento_v2b` non contiene `datasets/`; ogni run fallisce dopo circa 36 secondi con
+    `FileNotFoundError: Nessun dataset trovato`. Da indicare nel LEGGIMI del pacchetto (copiare `datasets/acn`).
+

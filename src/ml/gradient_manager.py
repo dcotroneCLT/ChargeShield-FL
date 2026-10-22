@@ -60,8 +60,15 @@ class GradientManager(AbstractMLModel):
         self.epsilon       = epsilon
         self.delta         = delta
         self.max_grad_norm = max_grad_norm
+        # Calibrazione (2026-10-16, Segnalazioni R voce 78): "analitica" (default,
+        # Balle e Wang 2018, adiacenze dichiarate in src/ml/client_dp_accounting.py)
+        # o "classica" (formula precedente, solo per riprodurre le run vecchie).
+        self.sigma_calibration = str(config.get("sigma_calibration", "analitica"))
+        if self.sigma_calibration not in ("analitica", "classica"):
+            raise ValueError(f"sigma_calibration non valida: {self.sigma_calibration!r}")
 
-        # Sigma per Gaussian Mechanism: σ = max_grad_norm * sqrt(2*ln(1.25/δ)) / ε
+        # sigma per client (dp-fedavg/local): sensibilita' 2C con l'analitica
+        # (sostituzione), C con la classica (comportamento precedente)
         self.sigma = self._compute_sigma()
 
         self._listeners: list[MLPlaneListener] = []
@@ -220,11 +227,12 @@ class GradientManager(AbstractMLModel):
                 f"delta={self.delta} è insolitamente alto per DP — "
                 "valori tipici sono 1e-5 o inferiori. Verificare la configurazione."
             )
-        return (
-            self.max_grad_norm
-            * math.sqrt(2 * math.log(1.25 / self.delta))
-            / self.epsilon
-        )
+        from ml.client_dp_accounting import sigma_classico, sigma_gaussiano_analitico
+        if self.sigma_calibration == "classica":
+            self._sigma_unit = sigma_classico(self.epsilon, self.delta, 1.0)
+            return self.max_grad_norm * self._sigma_unit
+        self._sigma_unit = sigma_gaussiano_analitico(self.epsilon, self.delta, 1.0)
+        return 2.0 * self.max_grad_norm * self._sigma_unit
 
     def clip_only(
         self,
@@ -471,7 +479,10 @@ class GradientManager(AbstractMLModel):
             )
             max_weight_fraction = 1.0 / max(1, n_participants)
 
-        sigma_central = self.sigma * max_weight_fraction
+        # analitica: sostituzione dei dati di un client (pesi n_i pubblici e fissi,
+        # tutti i client partecipano), D = 2 w_max C (revisione 2026-10-16)
+        sigma_central = (self.sigma * max_weight_fraction if self.sigma_calibration == "classica"
+                         else 2.0 * self._sigma_unit * self.max_grad_norm * max_weight_fraction)
         tensors = [
             w if isinstance(w, torch.Tensor) else torch.tensor(w)
             for w in global_weights

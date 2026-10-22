@@ -1,0 +1,111 @@
+# ChargeShield-FL — Canary persona nel regime indotto: DP per soggetto, solo taglio (sigma = 0) (2026-10-15)
+#
+# Derivato da experiment_canary_multisite.yaml (generato da
+# genera_config_subject_clip.py): identico tranne experiment.name, ml.norm
+# (group) e ml.subject_dp con sigma = 0: taglio per soggetto,
+# nessun rumore. Lo usa scripts/canary_persona.py (--config), che allena
+# sempre con no_dp=True: la DP per soggetto si attiva solo da qui.
+#
+# SCOPO: controllo "solo taglio" della DP per soggetto, l'equivalente misurato
+# del punto di osservazione A2 (docs/ESPERIMENTI.md, "DP per soggetto:
+# controllo solo taglio"). Tre bracci con la stessa normalizzazione
+# GroupNorm, richiesta dal taglio per soggetto: riferimento senza DP
+# (experiment_canary_multisite_gn), solo taglio con sigma = 0
+# (experiment_canary_multisite_subject_s0, nessuna garanzia formale) e DP
+# per soggetto completa con sigma = 2 (experiment_canary_multisite_subject_s2,
+# stessi parametri di experiment_acn_subjectdp.yaml).
+#
+# Soggetto = userID. Le sessioni senza userID sono soggetti singoli; le copie
+# della persona costruita conservano il suo userID, quindi contano come un
+# solo soggetto (al piu' 64 sessioni per passo).
+#
+
+experiment:
+  name: chargeshield_canary_multisite_subject_s0
+  fl_rounds: 3
+  seed: 42
+  epsilon: 1.0
+  delta: 1.0e-5
+  max_grad_norm: 1.0
+
+sites:
+  caltech:
+    - datasets/acn/caltech/acndata_sessions_2018.json
+    - datasets/acn/caltech/acndata_sessions_2019.json
+    - datasets/acn/caltech/acndata_sessions_2020.json
+    - datasets/acn/caltech/acndata_sessions_2021.json
+  jpl:
+    - datasets/acn/jpl/acndata_sessions_2018.json
+    - datasets/acn/jpl/acndata_sessions_2019.json
+    - datasets/acn/jpl/acndata_sessions_2020.json
+    - datasets/acn/jpl/acndata_sessions_2021.json
+  office1:
+    - datasets/acn/office1/acndata_sessions_2019.json
+    - datasets/acn/office1/acndata_sessions_2020.json
+    - datasets/acn/office1/acndata_sessions_2021.json
+    # Nessun 2018: non disponibile per Office 1 su ev.caltech.edu.
+
+ml:
+  input_dim: 7
+  lr: 0.001
+  epochs: 1000
+  batch_size: 32
+  proximal_mu: 0.01
+  hidden_dims: [32, 16]
+  latent_dim: 8
+  norm: group
+  subject_dp:
+    enabled: true
+    subject_key: user_id
+    max_grad_norm: 1.0
+    noise_multiplier: 0.0
+    expected_subjects_per_step: 32
+    max_records_per_subject: 64
+    # 2026-10-16: sessioni senza userID raggruppate in profili di abitudine
+    # (src/ml/profili_abitudini.py), circa 100 sessioni di training per profilo;
+    # misura in docs/Segnalazioni, voce 88.
+    senza_chiave: profili
+    profili:
+      dimensione_media: 100
+      peso_gruppo: 1.0
+  feature_names:
+    - total_energy_kwh
+    - max_power_kw
+    - kwh_requested
+    - minutes_available
+    - hour_of_day
+    - duration_hours
+    - start_time_epoch
+
+canary:
+  enabled: true
+  site: office1              # canary iniettati solo in Office 1
+  nonmember_source: paired_split
+  swap_assignment: false      # braccio A
+  n_templates: 20             # == n_nonmember_templates: condizione dello scambio
+  n_duplicates: 30
+  n_nonmember_templates: 20
+
+output:
+  experiments_dir: experiments
+
+lira:
+  n_shadow: 8
+  # shadow_init: cold (aggiunto 2026-09-16, dopo lo smoke test s42).
+  # OMESSO per errore nella prima stesura di questi config: i config
+  # _canary_maxmemo{,_swap} da cui questo design deriva lo impostano a
+  # "cold", mentre il default del codice e' "warm" (run_experiments.py:3250,
+  # _warm_start attivo dal round 2). Lo smoke test s42 ha quindi girato con
+  # gli shadow warm-start mentre la campagna a 5 seed di riferimento girava
+  # cold: una variabile non controllata fra le due campagne, che tocca la
+  # calibrazione shadow e quindi canary_auc_roc (NON canary_raw_mse_auc_roc,
+  # che e' calcolata sulla loss del modello target e non vede gli shadow).
+  # Vedi anche Blocker 1 / Sprint 10zz+91: warm e cold non sono equivalenti
+  # in questo regime.
+  shadow_init: cold
+
+byzantine_attack:
+  enabled: false
+  attack_type: gradient_scaling
+  byzantine_node: synthetic_1
+  scale_factor: 10
